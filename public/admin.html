@@ -4644,7 +4644,7 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                 if (percent) percent.textContent = '0%';
                 if (bar) bar.style.width = '0%';
                 if (stopBtn) stopBtn.style.display = 'inline-flex';
-                // 跟随任务管理页的进度 — 切换到任务管理页看详情
+                window.__adminProductGenJobKey = data.jobKey;
                 window._freeGenJobKey = data.jobKey;
                 pollFreeTokenProgress(data.jobKey, status, percent, bar, stopBtn, container);
             } catch (e) { showMessage(e.message || '启动失败', 'error'); }
