@@ -2400,32 +2400,77 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                 <p>注册 OpenAI 账号 → 直接提取 Refresh Token（跳过支付，产出普号 token）</p>
             </div>
             <div class="panel">
-                <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;">
+                <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
                     <div class="panel-title">普号批量提取</div>
-                    <div style="display:flex;gap:12px;align-items:center;">
-                        <label style="font-size:13px;color:var(--text-dim);">数量</label>
-                        <input type="number" id="free_count" value="1" min="1" max="50" style="width:70px;">
-                        <label style="font-size:13px;color:var(--text-dim);margin-left:8px;">并发</label>
-                        <input type="number" id="free_workers" value="1" min="1" max="10" style="width:70px;">
-                        <button class="btn btn-primary" onclick="startFreeTokenGeneration()">
-                            <i data-lucide="play"></i> 开始提取
+                    <div class="panel-actions" style="display: flex; gap: 12px; align-items: center;">
+                        <input type="number" id="free_gen_count" value="1" min="1" max="50" class="asset-input" style="width: 80px;" placeholder="数量">
+                        <input type="number" id="free_gen_workers" value="1" min="1" max="10" class="asset-input" style="width: 80px;" placeholder="并发">
+                        <button class="btn btn-primary" onclick="startFreeTokenGeneration(this)">
+                            <i data-lucide="play"></i>
+                            开始提取
                         </button>
                     </div>
                 </div>
-                <div id="free_gen_progress_container" style="display:none;margin-bottom:24px;background:rgba(255,255,255,0.02);border:1px dashed rgba(255,255,255,0.1);padding:16px;border-radius:8px;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px;">
-                        <span id="free_gen_status" style="font-size:14px;color:var(--text-main);font-weight:600;">准备中...</span>
-                        <div style="display:flex;align-items:center;gap:10px;">
-                            <button class="btn btn-delete" id="free_gen_stop_btn" style="display:none;" onclick="stopAdminProductBatch({useCurrentJob:true})">
-                                <i data-lucide="square"></i> 停止
+
+                <div id="free_gen_progress_container" class="panel" style="display: none; margin-bottom: 24px; background: rgba(255, 255, 255, 0.02); border: 1px dashed rgba(255, 255, 255, 0.1);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;">
+                        <span id="free_gen_status" style="font-size: 14px; color: var(--text-main); font-weight: 600;">正在准备...</span>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <button type="button" class="btn btn-delete" id="free_gen_stop_btn" style="display: none;" onclick="stopAdminProductBatch({ useCurrentJob: true })">
+                                <i data-lucide="square"></i> 停止提取
                             </button>
-                            <span id="free_gen_percent" style="font-size:14px;color:var(--accent);font-weight:700;">0%</span>
+                            <span id="free_gen_percent" style="font-size: 14px; color: var(--accent); font-weight: 700;">0%</span>
                         </div>
                     </div>
-                    <div style="width:100%;height:8px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden;">
-                        <div id="free_gen_bar" style="width:0%;height:100%;background:linear-gradient(90deg,#22c55e,#10b981);transition:width 0.3s;"></div>
+                    <div style="width: 100%; height: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 4px; overflow: hidden;">
+                        <div id="free_gen_bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--accent), #a855f7); transition: width 0.3s ease;"></div>
                     </div>
                 </div>
+
+                <div class="batch-actions" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 16px;">
+                    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                        <input type="text" id="free_product_search" class="asset-input" placeholder="搜索邮箱账号" style="width: 220px;" oninput="handleFreeProductSearch(this.value)">
+                        <div class="filter-dropdown" data-filter="free_product">
+                            <button class="filter-trigger" onclick="toggleFilterMenu('free_product')"><span>全部状态</span><i data-lucide="chevron-down"></i></button>
+                            <div class="filter-menu">
+                                <button class="filter-option active" onclick="selectFilter('free_product', 'all', '全部状态')">全部状态</button>
+                                <button class="filter-option" onclick="selectFilter('free_product', 'status_normal', '正常')">正常</button>
+                                <button class="filter-option" onclick="selectFilter('free_product', 'status_disabled', '封禁')">封禁</button>
+                                <button class="filter-option" onclick="selectFilter('free_product', 'shipped', '已出库')">已出库</button>
+                                <button class="filter-option" onclick="selectFilter('free_product', 'unshipped', '未出库')">未出库</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                        <button class="btn btn-success" onclick="togglePageSelection('free_product')">
+                            <i data-lucide="check-square"></i>
+                            本页全选/取消
+                        </button>
+                        <button class="btn btn-success" onclick="batchExportFreeProducts()">
+                            <i data-lucide="download"></i>
+                            批量出库
+                        </button>
+                    </div>
+                </div>
+
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="select-header" width="60px">选择</th>
+                                <th>邮箱账号</th>
+                                <th width="150px">使用CDK</th>
+                                <th width="180px">KEY</th>
+                                <th width="200px">生产时间</th>
+                                <th width="100px" style="text-align:center">状态</th>
+                                <th width="100px" style="text-align:center">出库</th>
+                                <th width="150px" style="text-align:center">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="free_product_body"></tbody>
+                    </table>
+                </div>
+                <div id="free_product_pagination" class="table-footer"></div>
             </div>
         </div>
 
@@ -4623,63 +4668,36 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
             });
         }
 
-        async function startFreeTokenGeneration() {
-            const btn = event?.target?.closest('button') || document.querySelector('#free_tokens .btn-primary');
-            const count = parseInt(document.getElementById('free_count').value, 10) || 1;
-            const workers = parseInt(document.getElementById('free_workers').value, 10) || 1;
-            if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> 提交中...'; }
+        async function startFreeTokenGeneration(btn) {
+            const count = parseInt(document.getElementById('free_gen_count').value, 10) || 1;
+            const workers = parseInt(document.getElementById('free_gen_workers').value, 10) || 1;
+            if (!btn || btn.disabled) return;
+            btn.disabled = true;
+            const orig = btn.innerHTML;
+            btn.innerHTML = '<i data-lucide="loader" class="animate-spin"></i> 提交中...';
+            lucide.createIcons();
             try {
                 const res = await authFetch('/api/admin/products/generate-free', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ count, workers }) });
                 const data = await res.json();
                 if (!res.ok || data.success === false) throw new Error(data.message || '启动失败');
-                showMessage(data.message || '普号提取任务已启动', 'success');
-                // 显示进度条
-                const container = document.getElementById('free_gen_progress_container');
-                const status = document.getElementById('free_gen_status');
-                const percent = document.getElementById('free_gen_percent');
-                const bar = document.getElementById('free_gen_bar');
-                const stopBtn = document.getElementById('free_gen_stop_btn');
-                if (container) container.style.display = 'block';
-                if (status) status.textContent = '普号提取中...';
-                if (percent) percent.textContent = '0%';
-                if (bar) bar.style.width = '0%';
-                if (stopBtn) stopBtn.style.display = 'inline-flex';
+                const c = document.getElementById('free_gen_progress_container');
+                const s = document.getElementById('free_gen_status');
+                const p = document.getElementById('free_gen_percent');
+                const b = document.getElementById('free_gen_bar');
+                const stop = document.getElementById('free_gen_stop_btn');
+                if (c) c.style.display = 'block';
+                if (s) s.textContent = `正在提取 ${count} 个普号 RT...`;
+                if (p) p.textContent = '0%';
+                if (b) b.style.width = '0%';
+                if (stop) stop.style.display = 'inline-flex';
                 window.__adminProductGenJobKey = data.jobKey;
-                window._freeGenJobKey = data.jobKey;
-                pollFreeTokenProgress(data.jobKey, status, percent, bar, stopBtn, container);
+                showMessage(data.message || '普号提取任务已启动', 'success');
             } catch (e) { showMessage(e.message || '启动失败', 'error'); }
-            finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="play"></i> 开始提取'; lucide.createIcons(); } }
+            finally { btn.disabled = false; btn.innerHTML = orig; lucide.createIcons(); }
         }
 
-        function pollFreeTokenProgress(jobKey, statusEl, percentEl, barEl, stopBtn, container) {
-            const poll = async () => {
-                if (window._freeGenJobKey !== jobKey) return;
-                try {
-                    const res = await authFetch('/api/admin/runtime-logs?after=0&limit=1&tail=1');
-                    const d = await res.json();
-                    if (!d.success) return;
-                    // 查任务表状态
-                    const dataRes = await authFetch('/api/admin/data');
-                    const adminData = await dataRes.json();
-                    if (!adminData.success) return;
-                    const task = (adminData.logs || []).find(l => l.job_key === jobKey);
-                    if (task) {
-                        const p = Math.max(0, Math.min(100, Number(task.progress) || 0));
-                        if (percentEl) percentEl.textContent = p + '%';
-                        if (barEl) barEl.style.width = p + '%';
-                        if (statusEl) statusEl.textContent = task.message || '提取中...';
-                        if (['success','failed'].includes(task.status)) {
-                            if (statusEl) statusEl.textContent = task.status === 'success' ? '✅ 提取完成' : '❌ 提取失败';
-                            if (stopBtn) stopBtn.style.display = 'none';
-                            window._freeGenJobKey = null;
-                            return;
-                        }
-                    }
-                } catch (_) {}
-                setTimeout(poll, 3000);
-            };
-            poll();
-        }
+        function handleFreeProductSearch(query) { /* 复用成品号池搜索 */ }
+        async function batchExportFreeProducts() { showMessage('请到成品号池页面操作', 'warning'); }
 
         async function resumePendingProducts(btn) {
             const count = Math.max(1, Number(btn?.dataset?.count || 1));
