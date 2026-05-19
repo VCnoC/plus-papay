@@ -535,7 +535,8 @@ async function getSystemMetrics() {
 // ─── 普号提取后台批量 ───
 async function startAdminFreeTokenGeneration(count, workers) {
     const targetCount = Math.max(1, Math.min(Number(count) || 1, 50));
-    const workerCount = Math.min(targetCount, Math.max(1, Number(workers) || 1));
+    const maxConcurrent = Math.min(targetCount, Math.max(1, Number(workers) || 1));
+    const workerCount = maxConcurrent;
     const task = await store.createTaskLog({
         tokenPreview: 'FREE_TOKEN_GEN',
         cdkCode: `FREE_TOKEN_GEN:${targetCount}`,
