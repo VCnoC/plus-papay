@@ -252,24 +252,33 @@ async function listRecentEmailsForAdmin({
             const msgs = await fetchRecentMessagesFromMailbox(client, box, 120);
             for (const msg of msgs) {
                 const ts = envelopeTimestampMs(msg);
+                let bodyPreview = '';
+                if (msg.source) {
+                    try {
+                        const parsed = await simpleParser(msg.source);
+                        bodyPreview = [parsed.text || '', stripHtml(parsed.html || '')].join('\n').substring(0, 500);
+                    } catch (_) { /* 解析失败则留空 */ }
+                }
                 collected.push({
                     folder: box,
                     uid: msg.uid,
                     subject: msg.envelope?.subject || '',
                     from: formatAddresses(msg.envelope?.from),
                     date: ts ? new Date(ts).toISOString() : '',
+                    bodyPreview,
                     internalTs: ts
                 });
             }
         }
 
         collected.sort((a, b) => b.internalTs - a.internalTs);
-        return collected.slice(0, Math.max(1, Number(limit) || 50)).map(({ folder, uid, subject, from, date }) => ({
+        return collected.slice(0, Math.max(1, Number(limit) || 50)).map(({ folder, uid, subject, from, date, bodyPreview }) => ({
             folder,
             uid,
             subject,
             from,
-            date
+            date,
+            bodyPreview
         }));
     } finally {
         await client.logout().catch(() => { });

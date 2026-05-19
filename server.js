@@ -532,6 +532,87 @@ async function getSystemMetrics() {
     return systemMetricsCache.promise;
 }
 
+// ─── 普号提取后台批量 ───
+async function startAdminFreeTokenGeneration(count, workers) {
+    const targetCount = Math.max(1, Math.min(Number(count) || 1, 50));
+    const workerCount = Math.min(targetCount, Math.max(1, Number(workers) || 1));
+    const task = await store.createTaskLog({
+        tokenPreview: 'FREE_TOKEN_GEN',
+        cdkCode: `FREE_TOKEN_GEN:${targetCount}`,
+        status: 'running',
+        progress: 1
+    });
+
+    const itemProgress = new Map();
+    let completed = 0, successCount = 0, failedCount = 0, nextIndex = 1;
+    let lastError = '', lastProgress = 1, aborted = false;
+
+    registerAdminGenerationStop(task.jobKey, () => { aborted = true; });
+    const buildSummary = () => JSON.stringify({ kind: 'free_token_generation', targetCount, completedCount: completed, successCount, failedCount, workerCount, aborted, lastError });
+    const computeProgress = () => {
+        const inFlight = Array.from(itemProgress.values()).reduce((s, v) => s + Math.max(0, Math.min(99, Number(v) || 0)), 0);
+        return Math.max(lastProgress, Math.min(99, Math.floor(((completed * 100) + inFlight) / targetCount)));
+    };
+
+    logTask(task.jobKey, `🎬 普号提取启动  count=${targetCount}  workerCount=${workerCount}`);
+
+    (async () => {
+        const worker = async () => {
+            while (true) {
+                if (aborted) return;
+                const idx = nextIndex;
+                if (idx > targetCount) return;
+                nextIndex += 1;
+                const slotKey = `${task.jobKey}:item:${idx}`;
+                itemProgress.set(idx, 0);
+
+                try {
+                    let produced = false, attempt = 0;
+                    while (!produced) {
+                        if (aborted) return;
+                        attempt += 1;
+                        itemProgress.set(idx, 1);
+                        await store.updateTaskLog(task.jobKey, { status: 'running', message: `第 ${idx}/${targetCount} 个普号提取中 (尝试 ${attempt})...`, progress: computeProgress(), cdkCode: `FREE_TOKEN_GEN:${targetCount}`, rawOutput: buildSummary() });
+                        await waitForAvailableActivationSlot(activeBackgroundJobs, maxConcurrent);
+                        reserveBackgroundSlot(slotKey);
+
+                        try {
+                            const result = await startFreeTokenExtraction('', async () => {}, { jobKey: task.jobKey });
+                            if (result?.fileName) {
+                                successCount += 1;
+                                produced = true;
+                                logTask(task.jobKey, `第 ${idx}/${targetCount} 个普号 RT 提取成功`);
+                            } else {
+                                throw new Error('未返回有效结果');
+                            }
+                        } catch (error) {
+                            lastError = error.message || '未知错误';
+                            if (isFatalProductGenerationError(error)) { failedCount += 1; aborted = true; throw error; }
+                            logTask(task.jobKey, `第 ${idx}/${targetCount} 个非致命失败，准备重试: ${lastError}`, 'warn');
+                            itemProgress.set(idx, 1);
+                            await sleep(3000);
+                        } finally {
+                            releaseBackgroundSlot(slotKey);
+                        }
+                    }
+                } finally {
+                    if (!aborted) { completed += 1; itemProgress.delete(idx); }
+                }
+            }
+        };
+
+        try {
+            await Promise.all(Array.from({ length: workerCount }, () => worker()));
+            const finalStatus = aborted || failedCount > 0 ? 'failed' : 'success';
+            await store.updateTaskLog(task.jobKey, { status: finalStatus, message: finalStatus === 'success' ? `成功提取 ${successCount} 个普号 RT` : `提取中止，成功 ${successCount}${lastError ? `，原因：${lastError}` : ''}`, progress: 100, cdkCode: `FREE_TOKEN_GEN:${targetCount}`, rawOutput: buildSummary() });
+            broadcastToTask(task.jobKey, { type: 'progress', jobKey: task.jobKey, progress: 100, status: finalStatus, message: finalStatus === 'success' ? '普号提取完成' : lastError });
+        } catch (_) { }
+        unregisterAdminGenerationStop(task.jobKey);
+    })();
+
+    return { task, workerCount, targetCount };
+}
+
 async function startAdminProductGenerationTask(count, options = {}) {
     const targetCount = Math.max(1, Math.min(Number(count) || 1, 100));
     const maxConcurrentActivations = await store.getMaxBackgroundConcurrent();
@@ -2067,7 +2148,7 @@ app.get('/api/admin/products/:id/export', async (req, res) => {
     }
 });
 
-const { startProductCreation } = require('./product_activator');
+const { startProductCreation, startFreeTokenExtraction } = require('./product_activator');
 
 app.post('/api/admin/products/generate', async (req, res) => {
     const count = Math.max(1, Math.min(Number(req.body?.count) || 1, 100));
@@ -2085,6 +2166,30 @@ app.post('/api/admin/products/generate', async (req, res) => {
             jobKey: launched.task.jobKey,
             workerCount: launched.workerCount,
             message: `后台成品生产任务已启动，并发上限 ${launched.workerCount}`
+        });
+    } catch (error) {
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// ─── 普号提取：注册 + RT（跳过支付） ───
+app.post('/api/admin/products/generate-free', async (req, res) => {
+    const count = Math.max(1, Math.min(Number(req.body?.count) || 1, 50));
+    const workers = Math.max(1, Math.min(Number(req.body?.workers) || 1, 10));
+
+    try {
+        await ensureStoreReady();
+        const maintenanceModeState = await store.getMaintenanceModeState();
+        if (maintenanceModeState.enabled) {
+            return res.status(503).json({ success: false, message: '系统维护中，请稍后再试' });
+        }
+        const launched = await startAdminFreeTokenGeneration(count, workers);
+
+        return res.json({
+            success: true,
+            jobKey: launched.task.jobKey,
+            workerCount: launched.workerCount,
+            message: `普号提取任务已启动，并发上限 ${launched.workerCount}`
         });
     } catch (error) {
         return res.status(500).json({ success: false, message: error.message });

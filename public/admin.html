@@ -1570,6 +1570,10 @@
                 <i data-lucide="package"></i>
                 <span>成品号池</span>
             </div>
+            <div class="nav-item" onclick="switchPage('free_tokens', this)">
+                <i data-lucide="zap"></i>
+                <span>提取普号</span>
+            </div>
             <div class="nav-item" onclick="switchPage('logs', this)">
                 <i data-lucide="file-text"></i>
                 <span>任务管理</span>
@@ -2197,6 +2201,7 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                                 <th style="min-width:200px;">主题</th>
                                 <th style="min-width:160px;">发件人</th>
                                 <th width="200px">时间</th>
+                                <th style="min-width:280px;">正文（含验证码）</th>
                             </tr>
                         </thead>
                         <tbody id="pool_mail_preview_body"></tbody>
@@ -2387,6 +2392,43 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                 <div id="product_pagination" class="table-footer"></div>
             </div>
         </div>
+
+        <!-- 提取普号 -->
+        <div id="free_tokens" class="page-view">
+            <div class="page-header">
+                <h1>提取普号</h1>
+                <p>注册 OpenAI 账号 → 直接提取 Refresh Token（跳过支付，产出普号 token）</p>
+            </div>
+            <div class="panel">
+                <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;">
+                    <div class="panel-title">普号批量提取</div>
+                    <div style="display:flex;gap:12px;align-items:center;">
+                        <label style="font-size:13px;color:var(--text-dim);">数量</label>
+                        <input type="number" id="free_count" value="1" min="1" max="50" style="width:70px;">
+                        <label style="font-size:13px;color:var(--text-dim);margin-left:8px;">并发</label>
+                        <input type="number" id="free_workers" value="1" min="1" max="10" style="width:70px;">
+                        <button class="btn btn-primary" onclick="startFreeTokenGeneration()">
+                            <i data-lucide="play"></i> 开始提取
+                        </button>
+                    </div>
+                </div>
+                <div id="free_gen_progress_container" style="display:none;margin-bottom:24px;background:rgba(255,255,255,0.02);border:1px dashed rgba(255,255,255,0.1);padding:16px;border-radius:8px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px;">
+                        <span id="free_gen_status" style="font-size:14px;color:var(--text-main);font-weight:600;">准备中...</span>
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <button class="btn btn-delete" id="free_gen_stop_btn" style="display:none;" onclick="stopAdminProductBatch({useCurrentJob:true})">
+                                <i data-lucide="square"></i> 停止
+                            </button>
+                            <span id="free_gen_percent" style="font-size:14px;color:var(--accent);font-weight:700;">0%</span>
+                        </div>
+                    </div>
+                    <div style="width:100%;height:8px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden;">
+                        <div id="free_gen_bar" style="width:0%;height:100%;background:linear-gradient(90deg,#22c55e,#10b981);transition:width 0.3s;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div id="logs" class="page-view">
             <div class="page-header">
                 <h1>任务管理</h1>
@@ -3314,7 +3356,7 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                 }
                 const rows = data.messages || [];
                 if (!rows.length) {
-                    tbody.innerHTML = '<tr><td colspan="4">暂无邮件（请确认密码支持 IMAP，且已在系统配置中启用垃圾箱）</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="5">暂无邮件（请确认密码支持 IMAP，且已在系统配置中启用垃圾箱）</td></tr>';
                 } else {
                     tbody.innerHTML = rows.map((m) => `
                     <tr>
@@ -3322,12 +3364,13 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                         <td>${escapeHtml(m.subject)}</td>
                         <td>${escapeHtml(m.from)}</td>
                         <td>${escapeHtml(m.date)}</td>
+                        <td style="max-width:400px;word-break:break-all;font-size:13px">${escapeHtml(m.bodyPreview || '')}</td>
                     </tr>`).join('');
                 }
                 lucide.createIcons();
                 panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
             } catch (error) {
-                tbody.innerHTML = `<tr><td colspan="4">${escapeHtml(error.message || '加载失败')}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="5">${escapeHtml(error.message || '加载失败')}</td></tr>`;
             }
         }
 
@@ -4578,6 +4621,64 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                 initialText: `准备生产 ${count} 个成品号...`,
                 failMessage: '后台成品生产启动失败'
             });
+        }
+
+        async function startFreeTokenGeneration() {
+            const btn = event?.target?.closest('button') || document.querySelector('#free_tokens .btn-primary');
+            const count = parseInt(document.getElementById('free_count').value, 10) || 1;
+            const workers = parseInt(document.getElementById('free_workers').value, 10) || 1;
+            if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> 提交中...'; }
+            try {
+                const res = await authFetch('/api/admin/products/generate-free', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ count, workers }) });
+                const data = await res.json();
+                if (!res.ok || data.success === false) throw new Error(data.message || '启动失败');
+                showMessage(data.message || '普号提取任务已启动', 'success');
+                // 显示进度条
+                const container = document.getElementById('free_gen_progress_container');
+                const status = document.getElementById('free_gen_status');
+                const percent = document.getElementById('free_gen_percent');
+                const bar = document.getElementById('free_gen_bar');
+                const stopBtn = document.getElementById('free_gen_stop_btn');
+                if (container) container.style.display = 'block';
+                if (status) status.textContent = '普号提取中...';
+                if (percent) percent.textContent = '0%';
+                if (bar) bar.style.width = '0%';
+                if (stopBtn) stopBtn.style.display = 'inline-flex';
+                // 跟随任务管理页的进度 — 切换到任务管理页看详情
+                window._freeGenJobKey = data.jobKey;
+                pollFreeTokenProgress(data.jobKey, status, percent, bar, stopBtn, container);
+            } catch (e) { showMessage(e.message || '启动失败', 'error'); }
+            finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="play"></i> 开始提取'; lucide.createIcons(); } }
+        }
+
+        function pollFreeTokenProgress(jobKey, statusEl, percentEl, barEl, stopBtn, container) {
+            const poll = async () => {
+                if (window._freeGenJobKey !== jobKey) return;
+                try {
+                    const res = await authFetch('/api/admin/runtime-logs?after=0&limit=1&tail=1');
+                    const d = await res.json();
+                    if (!d.success) return;
+                    // 查任务表状态
+                    const dataRes = await authFetch('/api/admin/data');
+                    const adminData = await dataRes.json();
+                    if (!adminData.success) return;
+                    const task = (adminData.logs || []).find(l => l.job_key === jobKey);
+                    if (task) {
+                        const p = Math.max(0, Math.min(100, Number(task.progress) || 0));
+                        if (percentEl) percentEl.textContent = p + '%';
+                        if (barEl) barEl.style.width = p + '%';
+                        if (statusEl) statusEl.textContent = task.message || '提取中...';
+                        if (['success','failed'].includes(task.status)) {
+                            if (statusEl) statusEl.textContent = task.status === 'success' ? '✅ 提取完成' : '❌ 提取失败';
+                            if (stopBtn) stopBtn.style.display = 'none';
+                            window._freeGenJobKey = null;
+                            return;
+                        }
+                    }
+                } catch (_) {}
+                setTimeout(poll, 3000);
+            };
+            poll();
         }
 
         async function resumePendingProducts(btn) {

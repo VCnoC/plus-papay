@@ -698,9 +698,12 @@ async function runRegistrationProcess(onProgress, runtimeJobKey = '') {
     try {
         if (emailSource === 'pool') {
             poolSlot = await store.reservePoolEmail(ownerKey);
+            if (!poolSlot) {
+                throw new Error('邮箱池已无可用邮箱（均已注册），请导入新的 Outlook/Hotmail 邮箱后再试');
+            }
         }
     } catch (err) {
-        console.warn(`[Registration] 邮箱池预留失败，回退随机邮箱: ${err.message}`);
+        throw new Error(`邮箱池预留失败: ${err.message}`);
     }
 
     const childEnv = { ...process.env };
@@ -1172,9 +1175,87 @@ async function startProductCreation(cdk, progressCallback, options = {}) {
     throw new Error('该账号无激活权限,请更换账号重试');
 }
 
-if (require.main === module) {
-    const cdk = process.argv[2];
-    startProductCreation(cdk, console.log).catch(console.error);
+// ─── 普号提取：注册 + OAuth RT 提取（跳过支付） ───
+async function startFreeTokenExtraction(cdk, progressCallback, options = {}) {
+    let accountAttempt = 0;
+    const runtimeJobKey = String(options.jobKey || '');
+    const ownerKey = `free:${cdk || 'admin'}:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    runtimeLog.push({
+        jobKey: runtimeJobKey,
+        level: 'product',
+        source: 'product',
+        text: `🎬 [普号提取] 开始（跳过支付，注册 → OAuth RT） CDK = ${cdk || '(后台批量)'}`
+    });
+
+    while (accountAttempt < CONFIG.MAX_ACCOUNT_RETRIES) {
+        accountAttempt += 1;
+        progressCallback({ progress: 5, message: `正在注册第 ${accountAttempt} 个普号...` });
+
+        try {
+            const regResult = await runRegistrationProcess((payload) => {
+                progressCallback(payload);
+            }, runtimeJobKey);
+            const { email } = regResult;
+            const inboxBundle = {
+                emailSource: regResult.emailSource || '',
+                inboxJwt: regResult.inboxJwt || '',
+                inboxApiBase: regResult.inboxApiBase || ''
+            };
+
+            progressCallback({ progress: 80, message: '注册成功，正在提取 RT...' });
+
+            let randomDomainCfg = 'chiyiyi.cloud';
+            try {
+                randomDomainCfg = String(await store.getAppConfigValue('random_email_domain', 'chiyiyi.cloud'))
+                    .trim().replace(/^@/, '').toLowerCase() || 'chiyiyi.cloud';
+            } catch (_) { }
+
+            const protocolEnv = { ...process.env, RANDOM_EMAIL_DOMAIN: randomDomainCfg };
+            if (inboxBundle.emailSource) protocolEnv.EMAIL_SOURCE = inboxBundle.emailSource;
+            if (inboxBundle.inboxJwt) protocolEnv.INBOX_JWT = inboxBundle.inboxJwt;
+            if (inboxBundle.inboxApiBase) protocolEnv.INBOX_API_BASE = inboxBundle.inboxApiBase;
+
+            for (let attempt = 1; attempt <= CONFIG.MAX_PROTOCOL_RETRIES; attempt += 1) {
+                progressCallback({ progress: 82, message: attempt === 1 ? '正在通过 OAuth 提取 RT...' : `RT 提取第 ${attempt} 次重试...` });
+
+                const result = await runActivationChild(
+                    path.join(__dirname, 'oauth_login.js'),
+                    [email],
+                    protocolEnv,
+                    (line) => { /* 静默 */ },
+                    {
+                        idleTimeoutMs: CONFIG.CHILD_IDLE_TIMEOUT_MS,
+                        timeoutErrorMessage: 'RT 提取超时，已终止并准备重试',
+                        runtimeJobKey: String(runtimeJobKey || '')
+                    }
+                );
+
+                if (result.result && result.result.fileName && result.result.filePath) {
+                    progressCallback({ progress: 100, message: '✅ 普号 RT 提取成功' });
+                    return result.result;
+                }
+
+                if (isOauthAddPhoneError(result)) {
+                    throw new Error(`${OAUTH_ADD_PHONE_ERROR}，需要重新注册账号`);
+                }
+
+                if (attempt < CONFIG.MAX_PROTOCOL_RETRIES) {
+                    await sleep(CONFIG.RETRY_DELAY_MS);
+                }
+            }
+
+            throw new Error('RT 提取未返回有效结果');
+        } catch (error) {
+            const analysis = await analyzeProcessOutput(error.message || '', runtimeJobKey);
+            if (analysis.status === 'fatal') throw error;
+            if (accountAttempt >= CONFIG.MAX_ACCOUNT_RETRIES) throw error;
+            progressCallback({ progress: 10, message: `注册/提取失败，换号重试 (${accountAttempt}/${CONFIG.MAX_ACCOUNT_RETRIES}): ${analysis.message}` });
+            await sleep(CONFIG.RETRY_DELAY_MS);
+        }
+    }
+
+    throw new Error('普号提取失败，已达最大重试次数');
 }
 
-module.exports = { startProductCreation };
+module.exports = { startProductCreation, startFreeTokenExtraction };
