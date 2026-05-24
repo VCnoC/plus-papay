@@ -1,13 +1,15 @@
 """用卡开通 Grok Pro trial 订阅
 用法: python card_subscribe.py --sso <token> --card <卡号> --exp <MM/YY> --cvc <CVC>
 """
-import sys, json, time, uuid, re, argparse
+import sys, os, json, time, uuid, re, argparse
 sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
 import requests
 from curl_cffi import requests as cf
 
 PK = 'pk_live_51PksddHJohyvID2czYoS55WPrVoy5tQ2a6QqoEFqeZV85CCGShKYpZ6rn5wzdY1HhNzcttFdZuTsCrwip8Qp3PSN00boS3LmEd'
-YESCAPTCHA_KEY = ''
+# 🆕 从环境变量读取 YesCaptcha clientKey（由 Node 包装器 grok-subscribe.js 注入）
+# 这样前端 tab 填的 key、服务器 .env 配的 key 都能传进来
+YESCAPTCHA_KEY = os.environ.get('YESCAPTCHA_KEY', '')
 
 
 def solve_hcaptcha(site_key, page_url, rqdata):
