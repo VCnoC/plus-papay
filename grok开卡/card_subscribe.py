@@ -69,16 +69,46 @@ def subscribe(sso, card_number, exp_month, exp_year, cvc, proxy=None):
         json={'stripeHosted':{'successUrl':'https://grok.com/?checkout=success'},'priceId':'price_1R6nQ9HJohyvID2ck7FNrVdw','ignoreExistingActiveSubscriptions':True,'subscriptionType':'MONTHLY','requestedTier':'REQUESTED_TIER_GROK_PRO','campaignId':'subcamp_HeAxW'},
         impersonate='chrome131', timeout=15, proxies=proxies, allow_redirects=False, default_headers=False)
     if r.status_code != 200:
-        return {'error': f'checkout HTTP {r.status_code}'}
-    m = re.search(r'cs_live_[a-zA-Z0-9]+', r.json().get('url',''))
+        # 🆕 把响应体打出来（截断 600 字符）+ content-type，便于诊断
+        body_text = ''
+        try:
+            body_text = r.text[:600]
+        except Exception:
+            body_text = '<unable to read body>'
+        ctype = ''
+        try:
+            ctype = r.headers.get('content-type', '')
+        except Exception:
+            pass
+        print(f'    Grok resp content-type: {ctype}')
+        print(f'    Grok resp body[:600]: {body_text}')
+        # 同时尝试解析 JSON 拿到 error code（如果是结构化错误）
+        err_summary = ''
+        try:
+            j = r.json()
+            err_summary = f"code={j.get('code') or j.get('error',{}).get('code','')}  msg={j.get('message') or j.get('error',{}).get('message','')[:120]}"
+        except Exception:
+            err_summary = body_text[:160]
+        return {'error': f'checkout HTTP {r.status_code} | {err_summary}', 'body': body_text}
+    # 解析 url，加 try 防止非 JSON 响应
+    try:
+        url_str = r.json().get('url', '')
+    except Exception:
+        print(f'    Grok 200 但响应非 JSON: {r.text[:300]}')
+        return {'error': f'checkout 200 but non-JSON response: {r.text[:200]}'}
+    m = re.search(r'cs_live_[a-zA-Z0-9]+', url_str)
     if not m:
-        return {'error': f'no session'}
+        return {'error': f'no session id in url: {url_str[:200]}'}
     sid = m.group(0)
 
     # 2. Init + USD
     print('[2] Init + USD...')
-    init = s.post(f'https://api.stripe.com/v1/payment_pages/{sid}/init',
-        data={'key':PK,'eid':'NA','browser_locale':'en-US','redirect_type':'url'}, timeout=15).json()
+    init_resp = s.post(f'https://api.stripe.com/v1/payment_pages/{sid}/init',
+        data={'key':PK,'eid':'NA','browser_locale':'en-US','redirect_type':'url'}, timeout=15)
+    if init_resp.status_code != 200:
+        print(f'    Stripe init body[:400]: {init_resp.text[:400]}')
+        return {'error': f'stripe init HTTP {init_resp.status_code}'}
+    init = init_resp.json()
     eid = init.get('eid','NA')
     cs = init.get('init_checksum','')
     upd = s.post(f'https://api.stripe.com/v1/payment_pages/{sid}',
