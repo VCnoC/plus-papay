@@ -12,48 +12,76 @@ PK = 'pk_live_51PksddHJohyvID2czYoS55WPrVoy5tQ2a6QqoEFqeZV85CCGShKYpZ6rn5wzdY1Hh
 YESCAPTCHA_KEY = os.environ.get('YESCAPTCHA_KEY', '')
 
 
-def solve_hcaptcha(site_key, page_url, rqdata):
-    """解 hCaptcha (enterprise + rqdata 绑定)"""
-    task = {
-        'type': 'HCaptchaTaskProxyless',
-        'websiteURL': page_url,
-        'websiteKey': site_key,
-        'isEnterprise': True,
-        'enterprisePayload': {'rqdata': rqdata},
-    }
-    cr = requests.post('https://api.yescaptcha.com/createTask',
-        json={'clientKey': YESCAPTCHA_KEY, 'task': task}, timeout=30).json()
-    if cr.get('errorId'):
-        print(f'    Enterprise failed: {cr.get("errorDescription")}')
-        # fallback: 保留 rqdata 但去掉 isEnterprise
-        task['isEnterprise'] = False
+def solve_hcaptcha(site_key, page_url, rqdata, max_retries=3):
+    """解 hCaptcha (enterprise + rqdata 绑定) - 最多重试 max_retries 次
+
+    重试逻辑：
+    - 内层保留原 3 级 fallback (enterprise → non-enterprise → no-rqdata)
+    - 外层对"task failed / timeout"重试 max_retries 次（每次重新 createTask）
+    - 每次失败打印 YesCaptcha errorCode/errorDescription 便于排查
+    """
+    if not YESCAPTCHA_KEY:
+        print('    [WARN] YESCAPTCHA_KEY 未配置，无法解 hCaptcha')
+        return None
+
+    last_err = ''
+    for attempt in range(1, max_retries + 1):
+        if attempt > 1:
+            print(f'    [retry {attempt}/{max_retries}] 上次失败: {last_err}')
+            time.sleep(2)
+
+        task = {
+            'type': 'HCaptchaTaskProxyless',
+            'websiteURL': page_url,
+            'websiteKey': site_key,
+            'isEnterprise': True,
+            'enterprisePayload': {'rqdata': rqdata},
+        }
         cr = requests.post('https://api.yescaptcha.com/createTask',
             json={'clientKey': YESCAPTCHA_KEY, 'task': task}, timeout=30).json()
         if cr.get('errorId'):
-            print(f'    Non-enterprise also failed: {cr.get("errorDescription")}')
-            # last fallback: no enterprise payload at all
-            del task['enterprisePayload']
+            print(f'    Enterprise failed: {cr.get("errorDescription")}')
+            # fallback: 保留 rqdata 但去掉 isEnterprise
             task['isEnterprise'] = False
             cr = requests.post('https://api.yescaptcha.com/createTask',
                 json={'clientKey': YESCAPTCHA_KEY, 'task': task}, timeout=30).json()
             if cr.get('errorId'):
-                return None
-            print('    WARNING: solving without rqdata!')
+                print(f'    Non-enterprise also failed: {cr.get("errorDescription")}')
+                # last fallback: no enterprise payload at all
+                del task['enterprisePayload']
+                task['isEnterprise'] = False
+                cr = requests.post('https://api.yescaptcha.com/createTask',
+                    json={'clientKey': YESCAPTCHA_KEY, 'task': task}, timeout=30).json()
+                if cr.get('errorId'):
+                    last_err = f'createTask: code={cr.get("errorCode","")} desc={cr.get("errorDescription","")}'
+                    print(f'    createTask 全部失败: {last_err}')
+                    continue  # 进入下一次重试
+                print('    WARNING: solving without rqdata!')
+            else:
+                print('    Using non-enterprise with rqdata')
         else:
-            print('    Using non-enterprise with rqdata')
-    else:
-        print('    Enterprise mode OK')
-    tid = cr['taskId']
-    for i in range(60):
-        time.sleep(3)
-        tr = requests.post('https://api.yescaptcha.com/getTaskResult',
-            json={'clientKey': YESCAPTCHA_KEY, 'taskId': tid}, timeout=15).json()
-        if tr.get('status') == 'ready':
-            return tr.get('solution', {}).get('gRecaptchaResponse')
-        if tr.get('status') == 'failed':
-            return None
-        if i % 5 == 0 and i > 0:
-            print(f'    waiting ({i*3}s)...')
+            print(f'    [attempt {attempt}] Enterprise mode OK')
+
+        tid = cr['taskId']
+        polling_timed_out = True
+        for i in range(60):
+            time.sleep(3)
+            tr = requests.post('https://api.yescaptcha.com/getTaskResult',
+                json={'clientKey': YESCAPTCHA_KEY, 'taskId': tid}, timeout=15).json()
+            if tr.get('status') == 'ready':
+                return tr.get('solution', {}).get('gRecaptchaResponse')
+            if tr.get('status') == 'failed':
+                last_err = f'taskFailed: code={tr.get("errorCode","")} desc={tr.get("errorDescription","")}'
+                print(f'    YesCaptcha 返回失败: {last_err}')
+                polling_timed_out = False
+                break  # 跳出轮询，进入下一次重试
+            if i % 5 == 0 and i > 0:
+                print(f'    waiting ({i*3}s, attempt {attempt})...')
+        if polling_timed_out:
+            last_err = 'timeout 180s 未出结果'
+            print(f'    YesCaptcha 轮询 {last_err}')
+
+    print(f'    captcha {max_retries} 次重试全部失败: {last_err}')
     return None
 
 
