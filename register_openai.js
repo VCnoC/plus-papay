@@ -1851,34 +1851,69 @@ async function runRegistrationFlow() {
         }
 
         console.log("🎟️ [Step 7] 正在获取 Session 信息...");
-        // 等待 session 接口完成，如果返回空白则重试
+        // 🆕 [PATCH-Session] 改善 session 拉取逻辑：
+        //   ① 拉长初始等待（NextAuth 需要 5-10s 稳定）
+        //   ② 检测到 auth/error 页面必须先回主站建立会话
+        //   ③ 重试间隔统一 5 秒
+        //   ④ 重试前回 chatgpt.com 主站而不是傻刷 session 接口
+        await new Promise(r => setTimeout(r, 5000));  // ← 初始多等 5 秒让 NextAuth 稳定
         let sessionData = null;
-        for (let i = 0; i < 5; i++) {
+        const MAX_SESSION_RETRIES = 6;
+        for (let i = 0; i < MAX_SESSION_RETRIES; i++) {
             try {
-                // 确保已经在 chatgpt.com 域名下再访问 api
-                if (!page.url().includes('chatgpt.com')) {
-                    await page.goto("https://chatgpt.com", { waitUntil: 'networkidle' });
+                const beforeUrl = String(page.url() || '');
+                const onErrorPage = beforeUrl.includes('/auth/error')
+                    || beforeUrl.includes('/auth/login')
+                    || beforeUrl.includes('/auth/signin')
+                    || !beforeUrl.includes('chatgpt.com');
+
+                // ① 不在 chatgpt.com 主站 或 在 auth/error 错误页 → 先回主站建立会话
+                if (onErrorPage) {
+                    console.log(`🔁 [Step 7] 当前在 ${beforeUrl}，先回 chatgpt.com 主站建立会话...`);
+                    await page.goto("https://chatgpt.com/", { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+                    await new Promise(r => setTimeout(r, 3000));  // 让 NextAuth 把 session 写入 cookie
                 }
+
+                // ② 拉 session 接口
                 await page.goto("https://chatgpt.com/api/auth/session", { waitUntil: 'networkidle', timeout: 30000 });
                 const content = await page.textContent('body');
+
                 if (content && content.includes('accessToken')) {
                     sessionData = JSON.parse(content);
                     break;
+                }
+                // ③ 内容里有 user 但没 accessToken？继续等
+                if (content && content.includes('"user"')) {
+                    console.warn(`⚠️  [Step 7] session 含 user 但暂无 accessToken (${i + 1}/${MAX_SESSION_RETRIES})，继续等待...`);
+                } else if (content === '{}' || content === '') {
+                    console.warn(`⚠️  [Step 7] session 返回空对象 (${i + 1}/${MAX_SESSION_RETRIES})，可能还在建立会话...`);
                 } else {
-                    console.warn(`⚠️  [Warn] Session 页面内容异常，正在尝试刷新...`);
+                    console.warn(`⚠️  [Step 7] session 异常响应 (${i + 1}/${MAX_SESSION_RETRIES}): ${String(content).slice(0, 80)}`);
                 }
             } catch (e) {
-                console.warn(`⚠️  [Warn] 获取 Session 异常 (${i + 1}/5): ${e.message}`);
+                console.warn(`⚠️  [Step 7] 获取 Session 异常 (${i + 1}/${MAX_SESSION_RETRIES}): ${e.message}`);
             }
-            await page.reload({ waitUntil: 'networkidle' }).catch(() => { });
-            await new Promise(r => setTimeout(r, 3000));
+            // ④ 重试间隔统一 5 秒
+            await new Promise(r => setTimeout(r, 5000));
         }
 
         if (!sessionData || !sessionData.accessToken) {
-            throw new Error("无法获取有效的 Access Token (页面多次刷新无响应)");
+            // 🆕 [PATCH-RC-Fallback] RC 模式不强制要 accessToken
+            //   原因：RC 模式只需要 __Secure-next-auth.session-token cookie，
+            //   即使 chatgpt.com/auth/error 让 /api/auth/session 拿不到 AT，
+            //   只要前面 OTP 验证通过、浏览器拿到了 cookie，仍然可以出货。
+            //   RT 模式（OAuth）必须有 AT 才能往下走，保留原 throw 行为。
+            const isRcMode = String(process.env.FREE_TOKEN_MODE || '').toLowerCase() === 'rc';
+            if (isRcMode && process.env.FREE_TOKEN_FLOW === '1') {
+                console.warn('⚠️ [Step 7] AT 拿不到，但 RC 模式只需 cookie，降级继续...');
+                sessionData = sessionData || {};
+                sessionData.accessToken = sessionData.accessToken || '';
+            } else {
+                throw new Error("无法获取有效的 Access Token (页面多次刷新无响应)");
+            }
         }
 
-        console.log(`🎟️  Access Token 已获取`);
+        console.log(sessionData.accessToken ? `🎟️  Access Token 已获取` : `⚠️  Access Token 缺失（RC 模式继续）`);
         console.log("🎉 [Success] 注册流程全部完成！");
 
         if (poolEmailId) {
@@ -1890,9 +1925,14 @@ async function runRegistrationFlow() {
             }
         }
 
-        // 普号提取模式：注册完成后直接在同一浏览器中走OAuth2授权获取RT
-        let oauthResult = null;
+        // 🆕 [free_token 三模式派发] 根据 FREE_TOKEN_MODE 调用对应 handler
+        //   rt          → free_token/mode_register_rt.js（OAuth → RT → txt）
+        //   rc          → free_token/mode_register_rc.js（抓 cookie → txt）
+        //   existing_rt → 不走这里（该模式由 product_activator.js 直接 fork oauth_login.js）
+        let freeHandlerResult = null;
+        const freeMode = String(process.env.FREE_TOKEN_MODE || 'rt').toLowerCase();
         if (process.env.FREE_TOKEN_FLOW === '1' && browser && page && !page.isClosed()) {
+            // 保留浏览器 storageState（供 oauth_login.js 备用复用）
             try {
                 const statePath = `/tmp/free_token_state_${email.replace(/[^a-zA-Z0-9]/g, '_')}.json`;
                 await page.context().storageState({ path: statePath });
@@ -1901,57 +1941,26 @@ async function runRegistrationFlow() {
                 console.warn(`[FreeToken] 保存浏览器状态失败: ${stateErr.message}`);
             }
 
+            const handlerCtx = { page, email, sessionData, browser };
             try {
-                const { generatePKCE, exchangeToken } = require('./oauth_helper');
-                const { verifier, challenge } = generatePKCE();
-                const state = crypto.randomBytes(16).toString('hex');
-                const authUrl = `https://auth.openai.com/oauth/authorize?client_id=app_EMoamEEZ73f0CkXaXp7hrann&code_challenge=${challenge}&code_challenge_method=S256&codex_cli_simplified_flow=true&id_token_add_organizations=true&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&response_type=code&scope=openid+profile+email+offline_access&state=${state}`;
-                const proxyValue = process.env.PROXY || '';
-
-                console.log('[FreeToken] 注册完成，直接在同一浏览器中走OAuth2授权...');
-                await page.goto(authUrl, { waitUntil: 'domcontentloaded' });
-                await new Promise(r => setTimeout(r, 3000));
-
-                const currentUrl = page.url();
-
-                // 已授权完成：直接跳转到回调URL
-                if (currentUrl.includes('localhost:1455/auth/callback')) {
-                    const code = new URL(currentUrl).searchParams.get('code');
-                    if (code) {
-                        console.log('[FreeToken] 已授权完成，直接提取code');
-                        oauthResult = await exchangeToken(code, verifier, email, proxyValue);
-                    }
+                if (freeMode === 'rc') {
+                    const handler = require('./free_token/mode_register_rc');
+                    freeHandlerResult = await handler.process(handlerCtx);
+                } else if (freeMode === 'rt') {
+                    const handler = require('./free_token/mode_register_rt');
+                    freeHandlerResult = await handler.process(handlerCtx);
+                } else {
+                    console.log(`[FreeToken] mode=${freeMode} 在 register_openai.js 内不处理（跳过 handler 调用）`);
                 }
-                // 已登录，需要点击授权确认
-                else if (!currentUrl.includes('/authorize')) {
-                    console.log('[FreeToken] 已登录，点击授权确认...');
-                    try {
-                        await page.click('button[type="submit"]', { timeout: 5000 });
-                    } catch (_) {
-                        // 可能不需要点击，直接等跳转
-                    }
-                    const request = await page.waitForRequest(req =>
-                        req.url().includes('localhost:1455/auth/callback'),
-                        { timeout: 30000 }
-                    );
-                    const code = new URL(request.url()).searchParams.get('code');
-                    if (code) {
-                        oauthResult = await exchangeToken(code, verifier, email, proxyValue);
-                    }
-                }
-                // 未登录
-                else {
-                    console.log('[FreeToken] 未登录，关闭浏览器让oauth_login处理');
-                }
-            } catch (oauthErr) {
-                console.warn(`[FreeToken] OAuth2授权失败: ${oauthErr.message}`);
+            } catch (handlerErr) {
+                console.warn(`[FreeToken] mode=${freeMode} 处理失败: ${handlerErr.message}`);
             }
         }
 
         await browser.close();
 
-        // 如果OAuth2授权成功，直接返回RT结果
-        if (oauthResult) {
+        // 模式 A/B 成功 → 直接返回 oauthSuccess=true（避免 product_activator.js 再 fork oauth_login.js）
+        if (freeHandlerResult && freeHandlerResult.success) {
             return {
                 email,
                 accessToken: sessionData.accessToken,
@@ -1959,12 +1968,15 @@ async function runRegistrationFlow() {
                 inboxJwt: inboxJwt || '',
                 inboxApiBase: useInbox ? inboxApiBase : '',
                 oauthSuccess: true,
-                fileName: oauthResult.fileName,
-                filePath: oauthResult.filePath,
-                sub2apiPath: oauthResult.sub2apiPath,
-                sub2apiFile: oauthResult.sub2apiFile,
-                cpaPath: oauthResult.cpaPath,
-                cpaFile: oauthResult.cpaFile
+                freeMode,
+                fileName: `${email}.txt`,
+                filePath: '',
+                sub2apiPath: '',
+                sub2apiFile: '',
+                cpaPath: '',
+                cpaFile: '',
+                refreshToken: freeHandlerResult.refreshToken || '',
+                refreshCookie: freeHandlerResult.refreshCookie || ''
             };
         }
 

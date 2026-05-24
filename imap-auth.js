@@ -94,7 +94,9 @@ async function initializeImapAuth() {
     return forceRefreshImapToken();
 }
 
-// 懒加载：仅在首次需要 token 时才刷新，避免启动时阻塞
+initializeImapAuth().catch((error) => {
+    console.error(`❌ [IMAP] 启动预刷新失败: ${error.message}`);
+});
 
 module.exports = {
     initializeImapAuth,

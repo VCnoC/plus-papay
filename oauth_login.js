@@ -961,6 +961,32 @@ async function runFullProtocolFlow(email) {
             } else if (!currentUrl.includes('/authorize') && !bodyText.includes('Continue with') && !bodyText.includes('Welcome back')) {
                 isAlreadyLoggedIn = true;
                 console.log('✅ [FreeToken] 检测到已登录，跳过登录步骤');
+            } else if (bodyText.includes('Welcome back') || bodyText.includes('Choose an account') || bodyText.includes('选择帐户') || bodyText.includes('选择账号')) {
+                // 🆕 [PATCH] Welcome back 页面：OAuth 域 cookie 还在，但需要手动选已存在账号
+                try {
+                    const existingBtn = page.locator('button[name="session_id"]').first();
+                    if (await existingBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+                        console.log('🎯 [FreeToken] Welcome back 页面，点击已存在账号继续...');
+                        await existingBtn.click();
+                        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+                        await sleep(3000);
+                        const newUrl = page.url();
+                        if (newUrl.includes('localhost:1455/auth/callback')) {
+                            isAlreadyLoggedIn = true;
+                            isAlreadyAuthorized = true;
+                            console.log('✅ [FreeToken] 点击账号后直接到达 callback');
+                        } else if (!newUrl.includes('/login') && !newUrl.toLowerCase().includes('/log_in')) {
+                            isAlreadyLoggedIn = true;
+                            console.log('✅ [FreeToken] 点击账号后已登录，进入授权确认');
+                        } else {
+                            console.log('⚠️ [FreeToken] 点击账号后仍未登录，走完整登录流程');
+                        }
+                    } else {
+                        console.log('⚠️ [FreeToken] Welcome back 页面但未找到账号按钮，走完整登录流程');
+                    }
+                } catch (welcomeErr) {
+                    console.warn(`⚠️ [FreeToken] Welcome back 处理失败: ${welcomeErr.message}`);
+                }
             } else {
                 console.log('⚠️ [FreeToken] 未检测到登录状态，需要重新登录');
             }

@@ -679,7 +679,7 @@ async function runActivationChild(scriptPath, args, env, onLine, options = {}) {
     });
 }
 
-async function runRegistrationProcess(onProgress, runtimeJobKey = '') {
+async function runRegistrationProcess(onProgress, runtimeJobKey = '', freeMode = '') {
     let lastProgress = 5;
     let lastMessage = '正在准备注册账号...';
 
@@ -707,6 +707,16 @@ async function runRegistrationProcess(onProgress, runtimeJobKey = '') {
     }
 
     const childEnv = { ...process.env };
+
+    // 🆕 [free_token] 透传普号提取模式给 register_openai.js（'rt' | 'rc'，空则用 process.env 旧值）
+    if (freeMode) {
+        childEnv.FREE_TOKEN_FLOW = '1';
+        childEnv.FREE_TOKEN_MODE = String(freeMode).toLowerCase();
+    }
+    // 🆕 [free_token] 把 jobKey 透传给子进程，shared.js 用它写批次独立 txt
+    if (runtimeJobKey) {
+        childEnv.FREE_TOKEN_JOB_KEY = String(runtimeJobKey);
+    }
 
     // 邮箱来源标记
     childEnv.EMAIL_SOURCE = emailSource;
@@ -1175,28 +1185,55 @@ async function startProductCreation(cdk, progressCallback, options = {}) {
     throw new Error('该账号无激活权限,请更换账号重试');
 }
 
-// ─── 普号提取：注册 + OAuth RT 提取（跳过支付） ───
+// ─── 普号提取：三种模式分派（rt | rc | existing_rt）───
+//   rt          → 注册 + OAuth → refresh_token（沿用现有流程，加 Welcome back 补丁）
+//   rc          → 注册 + 抓 __Secure-next-auth.session-token cookie（不走 OAuth）
+//   existing_rt → 跳过注册，对 pool_emails (registered=1) 的老号走 OAuth → refresh_token
 async function startFreeTokenExtraction(cdk, progressCallback, options = {}) {
+    const mode = String(options.mode || 'rt').toLowerCase();
+
+    // ───── 模式 C：已注册邮箱 → OAuth → RT（独立分支，跳过注册）─────
+    if (mode === 'existing_rt') {
+        const modeC = require('./free_token/mode_existing_rt');
+        const runtimeJobKey = String(options.jobKey || '');
+        runtimeLog.push({
+            jobKey: runtimeJobKey,
+            level: 'product',
+            source: 'product',
+            text: `🎬 [普号提取/老号→RT] 开始 CDK=${cdk || '(后台批量)'}`
+        });
+        return await modeC.run({
+            runChild: runActivationChild,
+            progressCallback,
+            options: { ...options, jobKey: runtimeJobKey }
+        });
+    }
+
+    // ───── 模式 A/B：新注册流程，FREE_TOKEN_MODE 透传给 register_openai.js ─────
     let accountAttempt = 0;
     const runtimeJobKey = String(options.jobKey || '');
     const ownerKey = `free:${cdk || 'admin'}:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const modeLabel = mode === 'rc' ? '注册→RC' : '注册→RT';
 
     runtimeLog.push({
         jobKey: runtimeJobKey,
         level: 'product',
         source: 'product',
-        text: `🎬 [普号提取] 开始（跳过支付，注册 → OAuth RT） CDK = ${cdk || '(后台批量)'}`
+        text: `🎬 [普号提取/${modeLabel}] 开始 CDK=${cdk || '(后台批量)'}`
     });
 
     while (accountAttempt < CONFIG.MAX_ACCOUNT_RETRIES) {
         accountAttempt += 1;
-        progressCallback({ progress: 5, message: `正在注册第 ${accountAttempt} 个普号...` });
+        progressCallback({ progress: 5, message: `正在注册第 ${accountAttempt} 个普号 (mode=${mode})...` });
 
         try {
             process.env.FREE_TOKEN_FLOW = '1';
+            process.env.FREE_TOKEN_MODE = mode;
+
             const regResult = await runRegistrationProcess((payload) => {
                 progressCallback(payload);
-            }, runtimeJobKey);
+            }, runtimeJobKey, mode);
+
             const { email } = regResult;
             const inboxBundle = {
                 emailSource: regResult.emailSource || '',
@@ -1204,20 +1241,31 @@ async function startFreeTokenExtraction(cdk, progressCallback, options = {}) {
                 inboxApiBase: regResult.inboxApiBase || ''
             };
 
-            // 注册时已直接获取RT（FreeToken模式复用浏览器）
-            if (regResult.oauthSuccess && regResult.fileName) {
-                progressCallback({ progress: 100, message: '✅ 普号 RT 提取成功（注册流程内完成）' });
+            // 注册流程内 handler 已成功（模式 A 拿到 RT，或模式 B 抓到 RC）→ 直接返回
+            if (regResult.oauthSuccess) {
+                const successLabel = (regResult.freeMode || mode) === 'rc' ? 'RC' : 'RT';
+                progressCallback({ progress: 100, message: `✅ 普号 ${successLabel} 提取成功（注册流程内完成）` });
                 return {
-                    fileName: regResult.fileName,
-                    filePath: regResult.filePath,
-                    sub2apiPath: regResult.sub2apiPath,
-                    sub2apiFile: regResult.sub2apiFile,
-                    cpaPath: regResult.cpaPath,
-                    cpaFile: regResult.cpaFile
+                    fileName: regResult.fileName || `${email}.txt`,
+                    filePath: regResult.filePath || '',
+                    sub2apiPath: regResult.sub2apiPath || '',
+                    sub2apiFile: regResult.sub2apiFile || '',
+                    cpaPath: regResult.cpaPath || '',
+                    cpaFile: regResult.cpaFile || '',
+                    refreshToken: regResult.refreshToken || '',
+                    refreshCookie: regResult.refreshCookie || '',
+                    freeMode: regResult.freeMode || mode,
+                    email
                 };
             }
 
-            progressCallback({ progress: 80, message: '注册成功，正在提取 RT...' });
+            // 模式 B（RC）handler 没成功也不 fallback：抓 cookie 失败说明账号本身有问题，换号重试
+            if (mode === 'rc') {
+                throw new Error('RefreshCookie 提取失败（无 __Secure-next-auth.session-token cookie），换号重试');
+            }
+
+            // ───── 模式 A 的 fallback：handler 失败 → 重启浏览器走 oauth_login.js（原流程）─────
+            progressCallback({ progress: 80, message: '注册成功但同浏览器 OAuth 失败，回退到 oauth_login.js...' });
 
             let randomDomainCfg = 'chiyiyi.cloud';
             try {
@@ -1225,7 +1273,7 @@ async function startFreeTokenExtraction(cdk, progressCallback, options = {}) {
                     .trim().replace(/^@/, '').toLowerCase() || 'chiyiyi.cloud';
             } catch (_) { }
 
-            const protocolEnv = { ...process.env, RANDOM_EMAIL_DOMAIN: randomDomainCfg, FREE_TOKEN_FLOW: '1' };
+            const protocolEnv = { ...process.env, RANDOM_EMAIL_DOMAIN: randomDomainCfg, FREE_TOKEN_FLOW: '1', FREE_TOKEN_MODE: mode, FREE_TOKEN_JOB_KEY: String(runtimeJobKey || '') };
             if (inboxBundle.emailSource) protocolEnv.EMAIL_SOURCE = inboxBundle.emailSource;
             if (inboxBundle.inboxJwt) protocolEnv.INBOX_JWT = inboxBundle.inboxJwt;
             if (inboxBundle.inboxApiBase) protocolEnv.INBOX_API_BASE = inboxBundle.inboxApiBase;
@@ -1262,6 +1310,20 @@ async function startFreeTokenExtraction(cdk, progressCallback, options = {}) {
                     }
                 );
 
+                if (result.result && result.result.cpaPath) {
+                    // 🆕 fallback 也追加到 txt（模式 A 统一输出口径）
+                    try {
+                        const cpaData = JSON.parse(require('fs').readFileSync(result.result.cpaPath, 'utf-8'));
+                        if (cpaData.refresh_token) {
+                            const shared = require('./free_token/shared');
+                            shared.appendRegisterRt(email, cpaData.refresh_token);
+                            console.log(`✅ [Mode-A/fallback] 已追加 RT 到 ${shared.OUTPUT_FILES.rt_register}`);
+                        }
+                    } catch (appendErr) {
+                        console.warn(`[Mode-A/fallback] 追加 txt 失败: ${appendErr.message}`);
+                    }
+                }
+
                 if (result.result && result.result.fileName && result.result.filePath) {
                     progressCallback({ progress: 100, message: '✅ 普号 RT 提取成功' });
                     return result.result;
@@ -1278,6 +1340,15 @@ async function startFreeTokenExtraction(cdk, progressCallback, options = {}) {
 
             throw new Error('RT 提取未返回有效结果');
         } catch (error) {
+            // 🆕 [PATCH-PoolExhausted] 池子耗尽 / 老号池空 / 已注册池空 → 立刻冒泡，不要傻重试
+            //   这些错误"换号"也救不了（根本没号可换），重试只会死循环
+            const msg = String(error?.message || '');
+            if (msg.includes('邮箱池已无可用邮箱')
+                || msg.includes('池子里没有可用的已注册邮箱')
+                || msg.includes('邮箱池预留失败')) {
+                throw error;
+            }
+
             const analysis = await analyzeProcessOutput(error.message || '', runtimeJobKey);
             if (analysis.status === 'fatal') throw error;
             if (accountAttempt >= CONFIG.MAX_ACCOUNT_RETRIES) throw error;

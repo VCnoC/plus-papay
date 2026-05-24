@@ -1574,6 +1574,10 @@
                 <i data-lucide="zap"></i>
                 <span>提取普号</span>
             </div>
+            <div class="nav-item" onclick="switchPage('grok_subscribe', this)">
+                <i data-lucide="sparkles"></i>
+                <span>Grok 开号</span>
+            </div>
             <div class="nav-item" onclick="switchPage('logs', this)">
                 <i data-lucide="file-text"></i>
                 <span>任务管理</span>
@@ -2397,16 +2401,24 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
         <div id="free_tokens" class="page-view">
             <div class="page-header">
                 <h1>提取普号</h1>
-                <p>注册 OpenAI 账号 → 直接提取 Refresh Token（跳过支付，产出普号 token）</p>
+                <p>三种提取模式：注册→RT（OAuth refresh_token）、注册→RC（网页 cookie）、老号→RT（已注册邮箱）</p>
             </div>
             <div class="panel">
-                <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
-                    <div class="panel-title">普号批量提取</div>
-                    <div class="panel-actions" style="display: flex; gap: 12px; align-items: center;">
-                        <input type="number" id="free_gen_count" value="1" min="1" max="50" class="asset-input" style="width: 80px;" placeholder="数量">
-                        <button class="btn btn-primary" onclick="startFreeTokenGeneration(this)">
-                            <i data-lucide="play"></i>
-                            开始提取
+                <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;">
+                    <div class="panel-title">普号批量提取（三模式独立）</div>
+                    <div class="panel-actions" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                        <input type="number" id="free_gen_count" value="1" min="1" class="asset-input" style="width: 80px;" placeholder="数量">
+                        <button class="btn btn-primary" onclick="startFreeTokenGeneration(this, 'rt')" title="注册 OpenAI → OAuth → refresh_token，输出 product_files/refresh_tokens_register.txt">
+                            <i data-lucide="key-round"></i>
+                            注册→RT
+                        </button>
+                        <button class="btn btn-primary" onclick="startFreeTokenGeneration(this, 'rc')" title="注册 OpenAI → 抓 __Secure-next-auth.session-token cookie，输出 product_files/refresh_cookies.txt">
+                            <i data-lucide="cookie"></i>
+                            注册→RC
+                        </button>
+                        <button class="btn btn-primary" onclick="startFreeTokenGeneration(this, 'existing_rt')" title="对 pool_emails 中已注册的老号走 OAuth → refresh_token，输出 product_files/refresh_tokens_existing.txt">
+                            <i data-lucide="rotate-cw"></i>
+                            老号→RT
                         </button>
                     </div>
                 </div>
@@ -2424,9 +2436,12 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                     <div style="width: 100%; height: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 4px; overflow: hidden;">
                         <div id="free_gen_bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--accent), #a855f7); transition: width 0.3s ease;"></div>
                     </div>
-                    <div id="free_gen_download" style="display: none; margin-top: 12px;">
+                    <div id="free_gen_download" style="display: none; margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap;">
                         <button class="btn btn-success" onclick="downloadFreeBatchZip()">
                             <i data-lucide="download"></i> 下载本批次文件
+                        </button>
+                        <button id="free_gen_sub2api_btn" class="btn btn-primary" onclick="downloadFreeBatchSub2api()" style="display: none;">
+                            <i data-lucide="file-json"></i> 下载 sub2api JSON
                         </button>
                     </div>
                 </div>
@@ -2475,6 +2490,149 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                     </table>
                 </div>
                 <div id="free_product_pagination" class="table-footer"></div>
+            </div>
+        </div>
+
+        <!-- Grok 开号（用卡开通 Grok Pro trial）-->
+        <div id="grok_subscribe" class="page-view">
+            <div class="page-header">
+                <h1>Grok 开号</h1>
+                <p>输入 Grok SSO Token + 银行卡信息，自动调用 Stripe SetupIntent 流程完成 Grok Pro 试用开通（含 hCaptcha 自动解码）</p>
+            </div>
+
+            <div class="config-grid" style="grid-template-columns: 1.2fr 1fr;">
+                <!-- 左：参数与启动 -->
+                <div class="panel">
+                    <h2 class="panel-title">开通参数</h2>
+
+                    <div class="form-group" style="margin-top: 22px;">
+                        <label>Grok SSO Token <span style="color: var(--danger);">*</span></label>
+                        <textarea id="grok_sso" rows="3" class="asset-input"
+                            style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; min-height: 90px; resize: vertical;"
+                            placeholder="登录 https://grok.com 后从 Cookie 中复制 sso 值（一长串 JWT）"></textarea>
+                        <p style="font-size: 13px; color: var(--text-dim); margin-top: 8px;">
+                            DevTools → Application → Cookies → <code>sso</code>。务必使用未开通过 Pro 的账号。
+                        </p>
+                    </div>
+
+                    <div class="form-group" style="margin-top: 18px;">
+                        <label>银行卡来源</label>
+                        <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                <input type="radio" name="grok_card_source" value="manual" checked onchange="onGrokCardSourceChange()">
+                                <span>手动输入</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                <input type="radio" name="grok_card_source" value="pool" onchange="onGrokCardSourceChange()">
+                                <span>从「银行卡池」选择</span>
+                            </label>
+                            <button type="button" class="btn btn-success" style="padding:6px 12px; font-size:13px;" onclick="loadGrokCardOptions()">
+                                <i data-lucide="refresh-cw"></i> 刷新卡池
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="grok_card_manual" style="margin-top: 12px;">
+                        <div class="form-group">
+                            <label>卡号</label>
+                            <input id="grok_card_number" class="asset-input"
+                                style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace;" placeholder="4xxx xxxx xxxx xxxx">
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px;">
+                            <div class="form-group" style="margin: 0;">
+                                <label>过期 (MM/YY)</label>
+                                <input id="grok_card_exp" class="asset-input" placeholder="08/29">
+                            </div>
+                            <div class="form-group" style="margin: 0;">
+                                <label>CVC</label>
+                                <input id="grok_card_cvc" class="asset-input" placeholder="123" maxlength="4">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="grok_card_pool_wrap" style="margin-top: 12px; display: none;">
+                        <div class="form-group">
+                            <label>选择卡池中的卡</label>
+                            <select id="grok_card_pool_select" class="asset-input" style="width: 100%;">
+                                <option value="">— 请先点击「刷新卡池」 —</option>
+                            </select>
+                            <p style="font-size: 13px; color: var(--text-dim); margin-top: 8px;">
+                                出于安全考虑，CVC 不入库，需手动填写 ↓
+                            </p>
+                        </div>
+                        <div class="form-group" style="margin-top: 8px;">
+                            <label>CVC <span style="color: var(--danger);">*</span></label>
+                            <input id="grok_pool_cvc" class="asset-input" placeholder="123" maxlength="4" style="max-width: 160px;">
+                        </div>
+                    </div>
+
+                    <div class="form-group" style="margin-top: 18px;">
+                        <label>代理（可选，留空则随机用全局代理池）</label>
+                        <input id="grok_proxy" class="asset-input" placeholder="http://user:pass@host:port  或留空">
+                        <p style="font-size: 13px; color: var(--text-dim); margin-top: 8px;">
+                            留空时自动从「系统配置 → 代理池」随机取一条；支持 <code>{session}</code> 占位。
+                        </p>
+                    </div>
+
+                    <div class="form-group" style="margin-top: 18px;">
+                        <label>YesCaptcha Key（仅本机保存于 LocalStorage）</label>
+                        <div style="display: flex; gap: 8px;">
+                            <input id="grok_captcha_key" class="asset-input" placeholder="YesCaptcha clientKey（解 hCaptcha 用）" style="flex: 1;">
+                            <button type="button" class="btn btn-success" onclick="saveGrokCaptchaKey()" style="padding: 8px 16px;">
+                                <i data-lucide="save"></i> 保存
+                            </button>
+                        </div>
+                        <p style="font-size: 13px; color: var(--text-dim); margin-top: 8px;">
+                            未配置时若触发 hCaptcha 挑战将失败。也可在服务端 <code>YESCAPTCHA_KEY</code> 环境变量中配置。
+                        </p>
+                    </div>
+
+                    <div style="display: flex; gap: 12px; align-items: center; margin-top: 24px;">
+                        <button id="grok_submit_btn" class="btn btn-primary" onclick="startGrokSubscribe(this)">
+                            <i data-lucide="play"></i>
+                            开始开通
+                        </button>
+                        <button class="btn btn-success" onclick="loadGrokJobs()">
+                            <i data-lucide="history"></i>
+                            最近任务
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 右：实时日志 + 历史 -->
+                <div class="panel">
+                    <h2 class="panel-title">实时日志</h2>
+                    <div id="grok_status_card" style="margin-top: 16px; padding: 14px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.1); display: none;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                            <span id="grok_status_text" style="font-weight: 600; color: var(--text-main);">准备中...</span>
+                            <span id="grok_status_card_no" style="font-size: 13px; color: var(--text-dim);"></span>
+                        </div>
+                        <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; margin-top: 10px;">
+                            <div id="grok_status_bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--accent), #a855f7); transition: width .3s;"></div>
+                        </div>
+                    </div>
+
+                    <div id="grok_log_box" style="margin-top: 16px; height: 460px; overflow-y: auto; padding: 12px; background: #0b0d12; border-radius: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.55; color: #cbd5e1;">
+                        <div style="color: #475569;">// 日志区，运行后将显示步骤与解码进度</div>
+                    </div>
+
+                    <h2 class="panel-title" style="margin-top: 24px;">最近 50 次任务</h2>
+                    <div class="table-container" style="margin-top: 12px;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th width="120">时间</th>
+                                    <th width="90" style="text-align:center">状态</th>
+                                    <th width="80">卡尾号</th>
+                                    <th>消息</th>
+                                </tr>
+                            </thead>
+                            <tbody id="grok_jobs_body">
+                                <tr><td colspan="4" style="text-align:center; color: var(--text-dim); padding: 24px;">暂无记录</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -3256,6 +3414,11 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
 
             if (pId === 'pool_emails') {
                 loadPoolEmails(false).catch(() => { });
+            }
+
+            if (pId === 'grok_subscribe') {
+                loadGrokCaptchaKey();
+                loadGrokJobs().catch(() => { });
             }
         }
 
@@ -4672,7 +4835,17 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
             });
         }
 
-        async function startFreeTokenGeneration(btn) {
+        async function startFreeTokenGeneration(btn, mode) {
+            const safeMode = (['rt', 'rc', 'existing_rt'].includes(String(mode || '').toLowerCase()))
+                ? String(mode).toLowerCase()
+                : 'rt';
+            const modeLabel = safeMode === 'rc' ? 'RC（cookie）' : (safeMode === 'existing_rt' ? '老号→RT' : 'RT');
+            const apiPath = safeMode === 'rc'
+                ? '/api/admin/products/generate-free-rc'
+                : (safeMode === 'existing_rt'
+                    ? '/api/admin/products/generate-free-existing-rt'
+                    : '/api/admin/products/generate-free-rt');
+
             const count = parseInt(document.getElementById('free_gen_count').value, 10) || 1;
             if (!btn || btn.disabled) return;
             btn.disabled = true;
@@ -4680,7 +4853,7 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
             btn.innerHTML = '<i data-lucide="loader" class="animate-spin"></i> 提交中...';
             lucide.createIcons();
             try {
-                const res = await authFetch('/api/admin/products/generate-free', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ count }) });
+                const res = await authFetch(apiPath, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ count, mode: safeMode }) });
                 const data = await res.json();
                 if (!res.ok || data.success === false) throw new Error(data.message || '启动失败');
                 const c = document.getElementById('free_gen_progress_container');
@@ -4689,7 +4862,7 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                 const b = document.getElementById('free_gen_bar');
                 const stop = document.getElementById('free_gen_stop_btn');
                 if (c) c.style.display = 'block';
-                if (s) s.textContent = `正在提取 ${count} 个普号 RT...`;
+                if (s) s.textContent = `正在提取 ${count} 个普号 ${modeLabel}...`;
                 if (p) p.textContent = '0%';
                 if (b) { b.style.width = '0%'; b.style.background = 'linear-gradient(90deg, var(--accent), #a855f7)'; }
                 if (stop) stop.style.display = 'inline-flex';
@@ -4732,12 +4905,27 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                     if (b) b.style.background = isSuccess ? 'var(--success)' : 'var(--danger)';
                     const dl = document.getElementById('free_gen_download');
                     if (dl) {
-                        if (isSuccess && zipPath) {
-                            dl.style.display = 'block';
+                        // 🆕 只要后端打包好了 zip，就允许下载（即使任务标记 failed，
+                        //    比如池子耗尽时只完成了 1000/1300 也要给VC酱拿到那 1000 个）
+                        if (zipPath) {
+                            dl.style.display = 'flex';
                             dl.dataset.zipJobKey = data.jobKey;
+                            // 🆕 [PATCH-Sub2API] 仅模式 B (rc) 才生成 sub2api JSON
+                            const subBtn = document.getElementById('free_gen_sub2api_btn');
+                            if (subBtn) {
+                                if (safeMode === 'rc') {
+                                    subBtn.style.display = 'inline-flex';
+                                    subBtn.dataset.zipJobKey = data.jobKey;
+                                } else {
+                                    subBtn.style.display = 'none';
+                                    subBtn.dataset.zipJobKey = '';
+                                }
+                            }
                         } else {
                             dl.style.display = 'none';
                             dl.dataset.zipJobKey = '';
+                            const subBtn = document.getElementById('free_gen_sub2api_btn');
+                            if (subBtn) { subBtn.style.display = 'none'; subBtn.dataset.zipJobKey = ''; }
                         }
                     }
                     btn.disabled = false; btn.innerHTML = orig; lucide.createIcons();
@@ -4764,7 +4952,8 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                             if (payload.status === 'success') {
                                 await finish(payload.message || `成功提取 ${count} 个普号 RT！`, true, payload.zipPath);
                             } else if (payload.status === 'failed' || payload.status === 'maintenance') {
-                                await finish(payload.message || '普号提取失败', false);
+                                // 🆕 失败/维护态也要传 zipPath，已成功的号才能让VC酱下载
+                                await finish(payload.message || '普号提取失败', false, payload.zipPath);
                             }
                         } catch (error) { console.error('Free token ws parse failed', error); }
                     };
@@ -4802,6 +4991,279 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
             const a = document.createElement('a');
             a.href = `/api/admin/products/free-download/${encodeURIComponent(jobKey)}?token=${encodeURIComponent(getAdminToken() || '')}`;
             a.download = `free_${jobKey}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        // ============================================================
+        // Grok 开号
+        // ============================================================
+        const GROK_CAPTCHA_LS_KEY = 'admin.grok.captchaKey';
+        let grokSocket = null;
+        let grokSettled = false;
+        let grokHbInterval = null;
+        let grokHbTimeout = null;
+        let grokReconnectTimer = null;
+
+        function onGrokCardSourceChange() {
+            const src = document.querySelector('input[name="grok_card_source"]:checked')?.value || 'manual';
+            document.getElementById('grok_card_manual').style.display = src === 'manual' ? 'block' : 'none';
+            document.getElementById('grok_card_pool_wrap').style.display = src === 'pool' ? 'block' : 'none';
+            if (src === 'pool') loadGrokCardOptions();
+        }
+
+        async function loadGrokCardOptions() {
+            try {
+                const res = await authFetch('/api/admin/grok/cards');
+                const data = await res.json();
+                if (!res.ok || data.success === false) throw new Error(data.message || '加载失败');
+                const sel = document.getElementById('grok_card_pool_select');
+                sel.innerHTML = '';
+                if (!data.cards.length) {
+                    sel.innerHTML = '<option value="">— 卡池为空 —</option>';
+                    return;
+                }
+                sel.innerHTML = data.cards.map((c) =>
+                    `<option value="${c.index}">#${c.index + 1}  ****${c.last4}  ${c.expiry}  (用过 ${c.usage_count} 次)</option>`
+                ).join('');
+                showMessage(`卡池加载完成（${data.usable}/${data.total} 可用）`, 'success');
+            } catch (e) {
+                showMessage(e.message || '加载卡池失败', 'error');
+            }
+        }
+
+        function saveGrokCaptchaKey() {
+            const v = document.getElementById('grok_captcha_key').value.trim();
+            if (!v) {
+                localStorage.removeItem(GROK_CAPTCHA_LS_KEY);
+                showMessage('已清除 CAPTCHA Key', 'success');
+                return;
+            }
+            localStorage.setItem(GROK_CAPTCHA_LS_KEY, v);
+            showMessage('已保存 CAPTCHA Key', 'success');
+        }
+
+        function loadGrokCaptchaKey() {
+            const v = localStorage.getItem(GROK_CAPTCHA_LS_KEY) || '';
+            const el = document.getElementById('grok_captcha_key');
+            if (el && !el.value) el.value = v;
+        }
+
+        function appendGrokLog(kind, text, extra = {}) {
+            const box = document.getElementById('grok_log_box');
+            if (!box) return;
+            const colorMap = {
+                step:    { c: '#60a5fa', p: '▶' },
+                log:     { c: '#94a3b8', p: '·' },
+                info:    { c: '#cbd5e1', p: 'ℹ' },
+                warn:    { c: '#fbbf24', p: '⚠' },
+                error:   { c: '#f87171', p: '✗' },
+                success: { c: '#4ade80', p: '✓' },
+            };
+            const m = colorMap[kind] || colorMap.log;
+            const ts = new Date(extra.ts || Date.now()).toLocaleTimeString();
+            const stepBadge = extra.step ? `<span style="color:#60a5fa;">[${extra.step}]</span> ` : '';
+            const line = document.createElement('div');
+            line.style.color = m.c;
+            line.innerHTML = `<span style="color:#475569;">${ts}</span> ${m.p} ${stepBadge}${escapeHtml(text)}`;
+            box.appendChild(line);
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function clearGrokLog() {
+            const box = document.getElementById('grok_log_box');
+            if (box) box.innerHTML = '';
+        }
+
+        function cleanupGrokSocket() {
+            if (grokHbInterval) { clearInterval(grokHbInterval); grokHbInterval = null; }
+            if (grokHbTimeout) { clearTimeout(grokHbTimeout); grokHbTimeout = null; }
+            if (grokReconnectTimer) { clearTimeout(grokReconnectTimer); grokReconnectTimer = null; }
+            if (grokSocket) { try { grokSocket.close(); } catch (_) {} grokSocket = null; }
+        }
+
+        async function startGrokSubscribe(btn) {
+            const sso = document.getElementById('grok_sso').value.trim();
+            if (!sso) { showMessage('请填写 Grok SSO Token', 'warning'); return; }
+
+            const src = document.querySelector('input[name="grok_card_source"]:checked')?.value || 'manual';
+            const payload = { sso };
+            if (src === 'manual') {
+                const card = document.getElementById('grok_card_number').value.replace(/\s+/g, '');
+                const exp = document.getElementById('grok_card_exp').value.trim();
+                const cvc = document.getElementById('grok_card_cvc').value.trim();
+                if (!card || !exp || !cvc) { showMessage('请完整填写卡号 / 过期 / CVC', 'warning'); return; }
+                payload.cardNumber = card;
+                payload.exp = exp;
+                payload.cvc = cvc;
+            } else {
+                const idx = document.getElementById('grok_card_pool_select').value;
+                const cvc = document.getElementById('grok_pool_cvc').value.trim();
+                if (idx === '' || idx === null) { showMessage('请先从卡池中选择一张卡', 'warning'); return; }
+                if (!cvc) { showMessage('请填写卡池所选卡的 CVC', 'warning'); return; }
+                payload.cardIndex = Number(idx);
+                payload.cvc = cvc;
+            }
+
+            const proxy = document.getElementById('grok_proxy').value.trim();
+            if (proxy) payload.proxy = proxy;
+            const captchaKey = (document.getElementById('grok_captcha_key').value
+                || localStorage.getItem(GROK_CAPTCHA_LS_KEY) || '').trim();
+            if (captchaKey) payload.yesCaptchaKey = captchaKey;
+
+            cleanupGrokSocket();
+            grokSettled = false;
+            clearGrokLog();
+
+            const card = document.getElementById('grok_status_card');
+            const text = document.getElementById('grok_status_text');
+            const bar = document.getElementById('grok_status_bar');
+            const cardNo = document.getElementById('grok_status_card_no');
+            card.style.display = 'block';
+            text.textContent = '🚀 提交任务中...';
+            bar.style.width = '5%';
+            bar.style.background = 'linear-gradient(90deg, var(--accent), #a855f7)';
+
+            const orig = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i data-lucide="loader" class="animate-spin"></i> 进行中...';
+            lucide.createIcons();
+
+            try {
+                const res = await authFetch('/api/admin/grok/subscribe', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (!res.ok || data.success === false) throw new Error(data.message || '启动失败');
+
+                if (cardNo) cardNo.textContent = `任务 ${data.jobKey.slice(0, 16)}...  卡尾号 ****${data.cardLast4}`;
+                appendGrokLog('info', `任务已启动 jobKey=${data.jobKey}`);
+                bar.style.width = '10%';
+
+                const scheduleHbTimeout = () => {
+                    if (grokHbTimeout) clearTimeout(grokHbTimeout);
+                    grokHbTimeout = setTimeout(() => {
+                        if (grokSocket && !grokSettled) { try { grokSocket.close(); } catch (_) {} }
+                    }, 12000);
+                };
+                const startHb = () => {
+                    scheduleHbTimeout();
+                    grokHbInterval = setInterval(() => {
+                        if (!grokSocket || grokSocket.readyState !== WebSocket.OPEN) return;
+                        try { grokSocket.send(JSON.stringify({ type: 'ping', ts: Date.now() })); scheduleHbTimeout(); }
+                        catch (e) { console.error('grok ws ping failed', e); }
+                    }, 5000);
+                };
+
+                const finish = (isSuccess, message) => {
+                    if (grokSettled) return;
+                    grokSettled = true;
+                    cleanupGrokSocket();
+                    text.textContent = message || (isSuccess ? '✅ 开通完成' : '❌ 开通失败');
+                    bar.style.width = '100%';
+                    bar.style.background = isSuccess ? 'var(--success)' : 'var(--danger)';
+                    btn.disabled = false;
+                    btn.innerHTML = orig;
+                    lucide.createIcons();
+                    loadGrokJobs();
+                };
+
+                const connect = () => {
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    grokSocket = new WebSocket(`${protocol}//${window.location.host}`);
+                    grokSocket.onopen = () => {
+                        if (grokReconnectTimer) { clearTimeout(grokReconnectTimer); grokReconnectTimer = null; }
+                        grokSocket.send(JSON.stringify({ type: 'subscribe', jobKey: data.jobKey }));
+                        startHb();
+                    };
+                    grokSocket.onmessage = (event) => {
+                        try {
+                            const m = JSON.parse(event.data);
+                            if (m.type === 'pong') { scheduleHbTimeout(); return; }
+                            if (m.jobKey && m.jobKey !== data.jobKey) return;
+                            scheduleHbTimeout();
+                            if (m.type === 'grok_log') {
+                                appendGrokLog(m.kind || 'log', m.text || '', { ts: m.ts, step: m.step });
+                                if (m.kind === 'step') {
+                                    const stepMatch = (m.text || '').match(/\[(\d+)\/(\d+)\]/) || (m.step ? [null, m.step, 6] : null);
+                                    if (stepMatch) {
+                                        const cur = Number(stepMatch[1]);
+                                        const total = Number(stepMatch[2] || 6);
+                                        const pct = Math.min(95, Math.round((cur / total) * 100));
+                                        bar.style.width = `${pct}%`;
+                                    }
+                                    text.textContent = m.text || text.textContent;
+                                }
+                            } else if (m.type === 'progress') {
+                                if (m.status === 'success') finish(true, m.message);
+                                else if (m.status === 'failed' || m.status === 'error') finish(false, m.message);
+                            }
+                        } catch (e) { console.error('grok ws parse error', e); }
+                    };
+                    grokSocket.onclose = () => {
+                        if (grokHbInterval) { clearInterval(grokHbInterval); grokHbInterval = null; }
+                        grokSocket = null;
+                        if (!grokSettled) {
+                            appendGrokLog('warn', 'WebSocket 断开，3 秒后重连...');
+                            grokReconnectTimer = setTimeout(connect, 3000);
+                        }
+                    };
+                    grokSocket.onerror = (err) => console.error('grok ws error', err);
+                };
+                connect();
+
+                showMessage('任务已启动，请关注右侧日志', 'success');
+            } catch (e) {
+                appendGrokLog('error', e.message || '启动失败');
+                text.textContent = `❌ ${e.message || '启动失败'}`;
+                bar.style.background = 'var(--danger)';
+                bar.style.width = '100%';
+                btn.disabled = false;
+                btn.innerHTML = orig;
+                lucide.createIcons();
+                showMessage(e.message || '启动失败', 'error');
+            }
+        }
+
+        async function loadGrokJobs() {
+            try {
+                const res = await authFetch('/api/admin/grok/jobs');
+                const data = await res.json();
+                if (!res.ok || data.success === false) throw new Error(data.message || '加载失败');
+                const tbody = document.getElementById('grok_jobs_body');
+                if (!data.jobs.length) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color: var(--text-dim); padding: 24px;">暂无记录</td></tr>';
+                    return;
+                }
+                const badge = (status) => {
+                    if (status === 'success') return '<span class="status-badge status-success">成功</span>';
+                    if (status === 'failed') return '<span class="status-badge status-failed">失败</span>';
+                    return '<span class="status-badge status-running">进行中</span>';
+                };
+                tbody.innerHTML = data.jobs.map((j) => `
+                    <tr>
+                        <td>${new Date(j.startedAt).toLocaleString()}</td>
+                        <td style="text-align:center">${badge(j.status)}</td>
+                        <td>****${escapeHtml(j.cardLast4 || '')}</td>
+                        <td style="color: var(--text-dim); font-size: 13px;">${escapeHtml(j.message || '')}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                showMessage(e.message || '加载历史失败', 'error');
+            }
+        }
+
+        // 🆕 [PATCH-Sub2API] 独立下载本批次 sub2api JSON（仅模式 B 可见）
+        function downloadFreeBatchSub2api() {
+            const subBtn = document.getElementById('free_gen_sub2api_btn');
+            const jobKey = subBtn?.dataset?.zipJobKey;
+            if (!jobKey) { showMessage('无可用 sub2api 下载链接（仅模式 B 生成）', 'warn'); return; }
+            const a = document.createElement('a');
+            a.href = `/api/admin/products/sub2api-download/${encodeURIComponent(jobKey)}?token=${encodeURIComponent(getAdminToken() || '')}`;
+            a.download = `sub2api_${jobKey}.json`;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);

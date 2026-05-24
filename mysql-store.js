@@ -1168,6 +1168,73 @@ async function markPoolEmailRegistered(id) {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────
+// 🆕 [free_token 模式 C] 从已注册池子取号 / 释放
+// 与 reservePoolEmail 的区别：仅取 registered = 1 的邮箱（模式 C 复用老号拿 RT）
+// ─────────────────────────────────────────────────────────────────
+async function reserveRegisteredPoolEmail(ownerKey = '') {
+    return withTransaction(async (connection) => {
+        const staleThreshold = new Date(Date.now() - ASSET_LOCK_STALE_MS);
+        const [rows] = await connection.query(
+            `SELECT id, email, password, client_id, refresh_token
+             FROM pool_emails
+             WHERE is_active = 1
+               AND registered = 1
+               AND (in_use = 0 OR locked_at IS NULL OR locked_at < ?)
+             ORDER BY id ASC
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED`,
+            [staleThreshold]
+        );
+
+        if (!rows.length) {
+            return null;
+        }
+
+        const row = rows[0];
+        await connection.query(
+            `UPDATE pool_emails
+             SET in_use = 1, locked_at = CURRENT_TIMESTAMP, locked_by = ?
+             WHERE id = ?`,
+            [String(ownerKey || '').slice(0, 64) || null, row.id]
+        );
+
+        return {
+            id: row.id,
+            email: row.email,
+            password: row.password || '',
+            clientId: row.client_id || '',
+            refreshToken: row.refresh_token || ''
+        };
+    });
+}
+
+async function releaseRegisteredPoolEmailReservation(id) {
+    if (!id) {
+        return;
+    }
+
+    // 注意 WHERE 条件用 registered = 1，避免误释放还没注册的号
+    await runExecute(
+        `UPDATE pool_emails
+         SET in_use = 0, locked_at = NULL, locked_by = NULL
+         WHERE id = ?
+           AND registered = 1`,
+        [Number(id)]
+    );
+}
+
+async function countRegisteredAvailablePoolEmails() {
+    const rows = await runQuery(
+        `SELECT COUNT(*) AS cnt
+         FROM pool_emails
+         WHERE is_active = 1
+           AND registered = 1
+           AND in_use = 0`
+    );
+    return Number(rows?.[0]?.cnt || 0);
+}
+
 // 把 {session} 占位符替换成随机字符串，便于 Kookeey/Brightdata 等住宅代理走 sticky session
 function substituteProxySession(rawProxy) {
     if (!rawProxy) {
@@ -1727,6 +1794,9 @@ module.exports = {
     reservePoolEmail,
     releasePoolEmailReservation,
     markPoolEmailRegistered,
+    reserveRegisteredPoolEmail,
+    releaseRegisteredPoolEmailReservation,
+    countRegisteredAvailablePoolEmails,
     getRuntimeAssets,
     reserveRuntimeAssets,
     releaseRuntimeAssets,
