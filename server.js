@@ -545,11 +545,12 @@ async function startAdminFreeTokenGeneration(count, workers) {
     });
 
     const itemProgress = new Map();
+    const extractedFiles = [];
     let completed = 0, successCount = 0, failedCount = 0, nextIndex = 1;
     let lastError = '', lastProgress = 1, aborted = false;
 
     registerAdminGenerationStop(task.jobKey, () => { aborted = true; });
-    const buildSummary = () => JSON.stringify({ kind: 'free_token_generation', targetCount, completedCount: completed, successCount, failedCount, workerCount, aborted, lastError });
+    const buildSummary = (zipPath) => JSON.stringify({ kind: 'free_token_generation', targetCount, completedCount: completed, successCount, failedCount, workerCount, aborted, lastError, zipPath, files: extractedFiles });
     const computeProgress = () => {
         const inFlight = Array.from(itemProgress.values()).reduce((s, v) => s + Math.max(0, Math.min(99, Number(v) || 0)), 0);
         return Math.max(lastProgress, Math.min(99, Math.floor(((completed * 100) + inFlight) / targetCount)));
@@ -582,6 +583,8 @@ async function startAdminFreeTokenGeneration(count, workers) {
                             if (result?.fileName) {
                                 successCount += 1;
                                 produced = true;
+                                if (result.sub2apiPath) extractedFiles.push({ type: 'sub2api', path: result.sub2apiPath, name: result.sub2apiFile || path.basename(result.sub2apiPath) });
+                                if (result.cpaPath) extractedFiles.push({ type: 'cpa', path: result.cpaPath, name: result.cpaFile || path.basename(result.cpaPath) });
                                 logTask(task.jobKey, `第 ${idx}/${targetCount} 个普号 RT 提取成功`);
                             } else {
                                 throw new Error('未返回有效结果');
@@ -604,9 +607,26 @@ async function startAdminFreeTokenGeneration(count, workers) {
 
         try {
             await Promise.all(Array.from({ length: workerCount }, () => worker()));
+            let zipPath = '';
+            if (extractedFiles.length > 0) {
+                try {
+                    const zipDir = path.join(__dirname, 'product_files', 'zip');
+                    fs.mkdirSync(zipDir, { recursive: true });
+                    zipPath = path.join(zipDir, `free_${task.jobKey}.zip`);
+                    const fileListTxt = path.join(zipDir, `free_${task.jobKey}_files.txt`);
+                    const fileLines = extractedFiles.map(f => f.path).join('\n');
+                    fs.writeFileSync(fileListTxt, fileLines, 'utf-8');
+                    const { execSync } = require('child_process');
+                    execSync(`zip -j "${zipPath}" @"${fileListTxt}"`, { stdio: 'ignore' });
+                    fs.unlinkSync(fileListTxt);
+                    logTask(task.jobKey, `📦 已打包 ${extractedFiles.length} 个文件: ${zipPath}`);
+                } catch (zipErr) {
+                    logTask(task.jobKey, `⚠️ 打包失败: ${zipErr.message}`, 'warn');
+                }
+            }
             const finalStatus = aborted || failedCount > 0 ? 'failed' : 'success';
-            await store.updateTaskLog(task.jobKey, { status: finalStatus, message: finalStatus === 'success' ? `成功提取 ${successCount} 个普号 RT` : `提取中止，成功 ${successCount}${lastError ? `，原因：${lastError}` : ''}`, progress: 100, cdkCode: `FREE_TOKEN_GEN:${targetCount}`, rawOutput: buildSummary() });
-            broadcastToTask(task.jobKey, { type: 'progress', jobKey: task.jobKey, progress: 100, status: finalStatus, message: finalStatus === 'success' ? '普号提取完成' : lastError });
+            await store.updateTaskLog(task.jobKey, { status: finalStatus, message: finalStatus === 'success' ? `成功提取 ${successCount} 个普号 RT` : `提取中止，成功 ${successCount}${lastError ? `，原因：${lastError}` : ''}`, progress: 100, cdkCode: `FREE_TOKEN_GEN:${targetCount}`, rawOutput: buildSummary(zipPath) });
+            broadcastToTask(task.jobKey, { type: 'progress', jobKey: task.jobKey, progress: 100, status: finalStatus, message: finalStatus === 'success' ? '普号提取完成' : lastError, zipPath });
         } catch (_) { }
         unregisterAdminGenerationStop(task.jobKey);
     })();
@@ -1563,8 +1583,10 @@ app.post('/api/admin/runtime-logs/clear', authenticateAdmin, (req, res) => {
 app.post('/api/admin/products/generate-stop', authenticateAdmin, async (req, res) => {
     try {
         const jobKey = String(req.body?.jobKey || '').trim();
+        console.log('[STOP] 收到停止请求 jobKey=' + (jobKey || '(空/全局)') + ' registeredKeys=' + JSON.stringify([...adminGenerationStopHandlers.keys()]));
         if (jobKey) {
             const ok = requestAdminGenerationStop(jobKey);
+            console.log('[STOP] 单个停止 jobKey=' + jobKey + ' result=' + ok);
             return res.json({
                 success: true,
                 stopped: ok ? 1 : 0,
@@ -1589,6 +1611,26 @@ app.post('/api/admin/products/generate-stop', authenticateAdmin, async (req, res
                 ? `已向 ${stopped} 个后台批次发送停止指令`
                 : '当前没有在本进程内登记的后台成品批量任务（若任务刚结束请在任务管理中刷新列表）'
         });
+    } catch (error) {
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.get('/api/admin/products/free-download/:jobKey', authenticateAdmin, async (req, res) => {
+    try {
+        const jobKey = String(req.params?.jobKey || '').trim();
+        if (!jobKey) {
+            return res.status(400).json({ success: false, message: '缺少 jobKey' });
+        }
+        const zipPath = path.join(__dirname, 'product_files', 'zip', `free_${jobKey}.zip`);
+        if (!fs.existsSync(zipPath)) {
+            return res.status(404).json({ success: false, message: '打包文件不存在，可能尚未完成或已被清理' });
+        }
+        const stat = fs.statSync(zipPath);
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', `attachment; filename=free_${jobKey}.zip`);
+        res.setHeader('Content-Length', stat.size);
+        fs.createReadStream(zipPath).pipe(res);
     } catch (error) {
         return res.status(500).json({ success: false, message: error.message });
     }
@@ -2176,7 +2218,8 @@ app.post('/api/admin/products/generate', async (req, res) => {
 // ─── 普号提取：注册 + RT（跳过支付） ───
 app.post('/api/admin/products/generate-free', async (req, res) => {
     const count = Math.max(1, Math.min(Number(req.body?.count) || 1, 50));
-    const workers = Math.max(1, Math.min(Number(req.body?.workers) || 1, 10));
+    const maxConcurrentActivations = await store.getMaxBackgroundConcurrent();
+    const workers = Math.min(count, Math.max(1, maxConcurrentActivations));
 
     try {
         await ensureStoreReady();

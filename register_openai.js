@@ -1,6 +1,7 @@
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
 const axios = require('axios');
+const crypto = require('node:crypto');
 const fs = require('fs');
 const path = require('path');
 const { getImapAuthHeaders } = require('./imap-auth');
@@ -1889,7 +1890,84 @@ async function runRegistrationFlow() {
             }
         }
 
+        // 普号提取模式：注册完成后直接在同一浏览器中走OAuth2授权获取RT
+        let oauthResult = null;
+        if (process.env.FREE_TOKEN_FLOW === '1' && browser && page && !page.isClosed()) {
+            try {
+                const statePath = `/tmp/free_token_state_${email.replace(/[^a-zA-Z0-9]/g, '_')}.json`;
+                await page.context().storageState({ path: statePath });
+                console.log(`[FreeToken] 已保存浏览器完整状态: ${statePath}`);
+            } catch (stateErr) {
+                console.warn(`[FreeToken] 保存浏览器状态失败: ${stateErr.message}`);
+            }
+
+            try {
+                const { generatePKCE, exchangeToken } = require('./oauth_helper');
+                const { verifier, challenge } = generatePKCE();
+                const state = crypto.randomBytes(16).toString('hex');
+                const authUrl = `https://auth.openai.com/oauth/authorize?client_id=app_EMoamEEZ73f0CkXaXp7hrann&code_challenge=${challenge}&code_challenge_method=S256&codex_cli_simplified_flow=true&id_token_add_organizations=true&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&response_type=code&scope=openid+profile+email+offline_access&state=${state}`;
+                const proxyValue = process.env.PROXY || '';
+
+                console.log('[FreeToken] 注册完成，直接在同一浏览器中走OAuth2授权...');
+                await page.goto(authUrl, { waitUntil: 'domcontentloaded' });
+                await new Promise(r => setTimeout(r, 3000));
+
+                const currentUrl = page.url();
+
+                // 已授权完成：直接跳转到回调URL
+                if (currentUrl.includes('localhost:1455/auth/callback')) {
+                    const code = new URL(currentUrl).searchParams.get('code');
+                    if (code) {
+                        console.log('[FreeToken] 已授权完成，直接提取code');
+                        oauthResult = await exchangeToken(code, verifier, email, proxyValue);
+                    }
+                }
+                // 已登录，需要点击授权确认
+                else if (!currentUrl.includes('/authorize')) {
+                    console.log('[FreeToken] 已登录，点击授权确认...');
+                    try {
+                        await page.click('button[type="submit"]', { timeout: 5000 });
+                    } catch (_) {
+                        // 可能不需要点击，直接等跳转
+                    }
+                    const request = await page.waitForRequest(req =>
+                        req.url().includes('localhost:1455/auth/callback'),
+                        { timeout: 30000 }
+                    );
+                    const code = new URL(request.url()).searchParams.get('code');
+                    if (code) {
+                        oauthResult = await exchangeToken(code, verifier, email, proxyValue);
+                    }
+                }
+                // 未登录
+                else {
+                    console.log('[FreeToken] 未登录，关闭浏览器让oauth_login处理');
+                }
+            } catch (oauthErr) {
+                console.warn(`[FreeToken] OAuth2授权失败: ${oauthErr.message}`);
+            }
+        }
+
         await browser.close();
+
+        // 如果OAuth2授权成功，直接返回RT结果
+        if (oauthResult) {
+            return {
+                email,
+                accessToken: sessionData.accessToken,
+                emailSource,
+                inboxJwt: inboxJwt || '',
+                inboxApiBase: useInbox ? inboxApiBase : '',
+                oauthSuccess: true,
+                fileName: oauthResult.fileName,
+                filePath: oauthResult.filePath,
+                sub2apiPath: oauthResult.sub2apiPath,
+                sub2apiFile: oauthResult.sub2apiFile,
+                cpaPath: oauthResult.cpaPath,
+                cpaFile: oauthResult.cpaFile
+            };
+        }
+
         // 把邮箱来源/JWT/API base 一起回传，让 oauth_login 用同一个邮箱后端拿验证码
         return {
             email,

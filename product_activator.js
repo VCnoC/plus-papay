@@ -1193,6 +1193,7 @@ async function startFreeTokenExtraction(cdk, progressCallback, options = {}) {
         progressCallback({ progress: 5, message: `正在注册第 ${accountAttempt} 个普号...` });
 
         try {
+            process.env.FREE_TOKEN_FLOW = '1';
             const regResult = await runRegistrationProcess((payload) => {
                 progressCallback(payload);
             }, runtimeJobKey);
@@ -1203,6 +1204,19 @@ async function startFreeTokenExtraction(cdk, progressCallback, options = {}) {
                 inboxApiBase: regResult.inboxApiBase || ''
             };
 
+            // 注册时已直接获取RT（FreeToken模式复用浏览器）
+            if (regResult.oauthSuccess && regResult.fileName) {
+                progressCallback({ progress: 100, message: '✅ 普号 RT 提取成功（注册流程内完成）' });
+                return {
+                    fileName: regResult.fileName,
+                    filePath: regResult.filePath,
+                    sub2apiPath: regResult.sub2apiPath,
+                    sub2apiFile: regResult.sub2apiFile,
+                    cpaPath: regResult.cpaPath,
+                    cpaFile: regResult.cpaFile
+                };
+            }
+
             progressCallback({ progress: 80, message: '注册成功，正在提取 RT...' });
 
             let randomDomainCfg = 'chiyiyi.cloud';
@@ -1211,10 +1225,27 @@ async function startFreeTokenExtraction(cdk, progressCallback, options = {}) {
                     .trim().replace(/^@/, '').toLowerCase() || 'chiyiyi.cloud';
             } catch (_) { }
 
-            const protocolEnv = { ...process.env, RANDOM_EMAIL_DOMAIN: randomDomainCfg };
+            const protocolEnv = { ...process.env, RANDOM_EMAIL_DOMAIN: randomDomainCfg, FREE_TOKEN_FLOW: '1' };
             if (inboxBundle.emailSource) protocolEnv.EMAIL_SOURCE = inboxBundle.emailSource;
             if (inboxBundle.inboxJwt) protocolEnv.INBOX_JWT = inboxBundle.inboxJwt;
             if (inboxBundle.inboxApiBase) protocolEnv.INBOX_API_BASE = inboxBundle.inboxApiBase;
+
+            if (inboxBundle.emailSource === 'pool') {
+                try {
+                    const poolEmail = await store.getPoolEmailByAddress(email);
+                    if (poolEmail) {
+                        const poolHost = await store.getAppConfigValue('pool_email_imap_host', 'outlook.office365.com');
+                        const poolIncludeJunk = await store.getAppConfigValue('pool_email_include_junk', '1');
+                        protocolEnv.POOL_EMAIL_PASSWORD = poolEmail.password || '';
+                        protocolEnv.POOL_EMAIL_CLIENT_ID = poolEmail.clientId || '';
+                        protocolEnv.POOL_EMAIL_REFRESH_TOKEN = poolEmail.refreshToken || '';
+                        protocolEnv.POOL_EMAIL_IMAP_HOST = String(poolHost).trim() || 'outlook.office365.com';
+                        protocolEnv.POOL_EMAIL_INCLUDE_JUNK = String(poolIncludeJunk || '1');
+                    }
+                } catch (poolErr) {
+                    console.warn('[FreeToken] 获取邮箱池凭据失败:', poolErr.message);
+                }
+            }
 
             for (let attempt = 1; attempt <= CONFIG.MAX_PROTOCOL_RETRIES; attempt += 1) {
                 progressCallback({ progress: 82, message: attempt === 1 ? '正在通过 OAuth 提取 RT...' : `RT 提取第 ${attempt} 次重试...` });

@@ -2404,7 +2404,6 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                     <div class="panel-title">普号批量提取</div>
                     <div class="panel-actions" style="display: flex; gap: 12px; align-items: center;">
                         <input type="number" id="free_gen_count" value="1" min="1" max="50" class="asset-input" style="width: 80px;" placeholder="数量">
-                        <input type="number" id="free_gen_workers" value="1" min="1" max="10" class="asset-input" style="width: 80px;" placeholder="并发">
                         <button class="btn btn-primary" onclick="startFreeTokenGeneration(this)">
                             <i data-lucide="play"></i>
                             开始提取
@@ -2424,6 +2423,11 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                     </div>
                     <div style="width: 100%; height: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 4px; overflow: hidden;">
                         <div id="free_gen_bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--accent), #a855f7); transition: width 0.3s ease;"></div>
+                    </div>
+                    <div id="free_gen_download" style="display: none; margin-top: 12px;">
+                        <button class="btn btn-success" onclick="downloadFreeBatchZip()">
+                            <i data-lucide="download"></i> 下载本批次文件
+                        </button>
                     </div>
                 </div>
 
@@ -4670,14 +4674,13 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
 
         async function startFreeTokenGeneration(btn) {
             const count = parseInt(document.getElementById('free_gen_count').value, 10) || 1;
-            const workers = parseInt(document.getElementById('free_gen_workers').value, 10) || 1;
             if (!btn || btn.disabled) return;
             btn.disabled = true;
             const orig = btn.innerHTML;
             btn.innerHTML = '<i data-lucide="loader" class="animate-spin"></i> 提交中...';
             lucide.createIcons();
             try {
-                const res = await authFetch('/api/admin/products/generate-free', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ count, workers }) });
+                const res = await authFetch('/api/admin/products/generate-free', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ count }) });
                 const data = await res.json();
                 if (!res.ok || data.success === false) throw new Error(data.message || '启动失败');
                 const c = document.getElementById('free_gen_progress_container');
@@ -4688,16 +4691,121 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                 if (c) c.style.display = 'block';
                 if (s) s.textContent = `正在提取 ${count} 个普号 RT...`;
                 if (p) p.textContent = '0%';
-                if (b) b.style.width = '0%';
+                if (b) { b.style.width = '0%'; b.style.background = 'linear-gradient(90deg, var(--accent), #a855f7)'; }
                 if (stop) stop.style.display = 'inline-flex';
                 window.__adminProductGenJobKey = data.jobKey;
+
+                // === WebSocket 进度监听（与成品号池一致）===
+                const wsHeartbeatIntervalMs = 5000;
+                const wsHeartbeatTimeoutMs = 12000;
+                let socket = null, settled = false;
+                let heartbeatInterval = null, heartbeatTimeout = null, reconnectTimer = null;
+                const clearHb = () => {
+                    clearInterval(heartbeatInterval); clearTimeout(heartbeatTimeout);
+                    heartbeatInterval = null; heartbeatTimeout = null;
+                };
+                const scheduleHbTimeout = () => {
+                    clearTimeout(heartbeatTimeout);
+                    heartbeatTimeout = setTimeout(() => {
+                        if (socket && !settled) { try { socket.close(); } catch (_) {} }
+                    }, wsHeartbeatTimeoutMs);
+                };
+                const startHb = () => {
+                    clearHb(); scheduleHbTimeout();
+                    heartbeatInterval = setInterval(() => {
+                        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+                        try { socket.send(JSON.stringify({ type: 'ping', ts: Date.now() })); scheduleHbTimeout(); }
+                        catch (e) { console.error('Free token ws ping failed', e); }
+                    }, wsHeartbeatIntervalMs);
+                };
+                const cleanupSocket = () => {
+                    clearHb(); clearTimeout(reconnectTimer); reconnectTimer = null;
+                    if (socket) { try { socket.close(); } catch (_) {} }
+                    socket = null;
+                };
+                const finish = async (message, isSuccess, zipPath) => {
+                    if (settled) return;
+                    settled = true; cleanupSocket();
+                    window.__adminProductGenJobKey = '';
+                    if (stop) stop.style.display = 'none';
+                    if (s) s.textContent = message;
+                    if (b) b.style.background = isSuccess ? 'var(--success)' : 'var(--danger)';
+                    const dl = document.getElementById('free_gen_download');
+                    if (dl) {
+                        if (isSuccess && zipPath) {
+                            dl.style.display = 'block';
+                            dl.dataset.zipJobKey = data.jobKey;
+                        } else {
+                            dl.style.display = 'none';
+                            dl.dataset.zipJobKey = '';
+                        }
+                    }
+                    btn.disabled = false; btn.innerHTML = orig; lucide.createIcons();
+                    await loadData();
+                };
+                const connectSocket = () => {
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    socket = new WebSocket(`${protocol}//${window.location.host}`);
+                    socket.onopen = () => {
+                        clearTimeout(reconnectTimer); reconnectTimer = null;
+                        socket.send(JSON.stringify({ type: 'subscribe', jobKey: data.jobKey }));
+                        startHb();
+                    };
+                    socket.onmessage = async (event) => {
+                        try {
+                            const payload = JSON.parse(event.data);
+                            if (payload.type === 'pong') { scheduleHbTimeout(); return; }
+                            if (payload.jobKey !== data.jobKey) return;
+                            scheduleHbTimeout();
+                            const progress = Math.max(0, Math.min(100, Math.round(Number(payload.progress) || 0)));
+                            if (b) b.style.width = `${progress}%`;
+                            if (p) p.textContent = `${progress}%`;
+                            if (payload.message && s) s.textContent = payload.message;
+                            if (payload.status === 'success') {
+                                await finish(payload.message || `成功提取 ${count} 个普号 RT！`, true, payload.zipPath);
+                            } else if (payload.status === 'failed' || payload.status === 'maintenance') {
+                                await finish(payload.message || '普号提取失败', false);
+                            }
+                        } catch (error) { console.error('Free token ws parse failed', error); }
+                    };
+                    socket.onclose = () => {
+                        clearHb(); socket = null;
+                        if (!settled) {
+                            if (s) s.textContent = '连接中断，正在重连...';
+                            clearTimeout(reconnectTimer);
+                            reconnectTimer = setTimeout(connectSocket, 3000);
+                        }
+                    };
+                    socket.onerror = (error) => { console.error('Free token ws error', error); };
+                };
+                connectSocket();
+                // === WebSocket end ===
+
                 showMessage(data.message || '普号提取任务已启动', 'success');
-            } catch (e) { showMessage(e.message || '启动失败', 'error'); }
-            finally { btn.disabled = false; btn.innerHTML = orig; lucide.createIcons(); }
+            } catch (e) {
+                window.__adminProductGenJobKey = '';
+                showMessage(e.message || '启动失败', 'error');
+            } finally {
+                if (!window.__adminProductGenJobKey) {
+                    btn.disabled = false; btn.innerHTML = orig; lucide.createIcons();
+                }
+            }
         }
 
         function handleFreeProductSearch(query) { /* 复用成品号池搜索 */ }
         async function batchExportFreeProducts() { showMessage('请到成品号池页面操作', 'warning'); }
+
+        function downloadFreeBatchZip() {
+            const dl = document.getElementById('free_gen_download');
+            const jobKey = dl?.dataset?.zipJobKey;
+            if (!jobKey) { showMessage('无可用下载链接', 'warn'); return; }
+            const a = document.createElement('a');
+            a.href = `/api/admin/products/free-download/${encodeURIComponent(jobKey)}?token=${encodeURIComponent(getAdminToken() || '')}`;
+            a.download = `free_${jobKey}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
 
         async function resumePendingProducts(btn) {
             const count = Math.max(1, Number(btn?.dataset?.count || 1));

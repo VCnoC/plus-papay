@@ -1076,6 +1076,26 @@ async function getPoolEmailCredentials(id) {
     };
 }
 
+async function getPoolEmailByAddress(email) {
+    const rows = await runQuery(
+        `SELECT id, email, password, client_id, refresh_token, registered, is_active
+         FROM pool_emails
+         WHERE email = ?
+         LIMIT 1`,
+        [String(email || '').trim().toLowerCase()]
+    );
+    const row = rows[0];
+    if (!row || Number(row.is_active || 0) !== 1) return null;
+    return {
+        id: row.id,
+        email: row.email,
+        password: row.password || '',
+        clientId: row.client_id || '',
+        refreshToken: row.refresh_token || '',
+        registered: Number(row.registered || 0) === 1
+    };
+}
+
 async function deletePoolEmail(id) {
     await runExecute(`DELETE FROM pool_emails WHERE id = ?`, [Number(id)]);
 }
@@ -1702,6 +1722,7 @@ module.exports = {
     bulkImportPoolEmails,
     listPoolEmails,
     getPoolEmailCredentials,
+    getPoolEmailByAddress,
     deletePoolEmail,
     reservePoolEmail,
     releasePoolEmailReservation,

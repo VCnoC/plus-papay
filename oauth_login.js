@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { getImapAuthHeaders } = require('./imap-auth');
 const inboxEmail = require('./inbox-email');
+const poolEmailImap = require('./pool-email-imap');
 
 // 使用 stealth 插件
 chromium.use(stealth);
@@ -195,6 +196,55 @@ async function getLatestCode(email, maxRetries = 30, excludeCode = '', options =
             onNoNewCodeFor30Seconds: options.onNoNewCodeFor30Seconds || null,
             onBeforePoll: options.onBeforePoll || null
         });
+    }
+
+    if (emailSource === 'pool') {
+        const poolPassword = String(process.env.POOL_EMAIL_PASSWORD || '');
+        const poolClientId = String(process.env.POOL_EMAIL_CLIENT_ID || '');
+        const poolRefreshToken = String(process.env.POOL_EMAIL_REFRESH_TOKEN || '');
+        const poolHost = String(process.env.POOL_EMAIL_IMAP_HOST || 'outlook.office365.com').trim() || 'outlook.office365.com';
+        const includeJunk = String(process.env.POOL_EMAIL_INCLUDE_JUNK || '1') === '1';
+
+        if (!poolRefreshToken && !poolPassword) {
+            throw new Error('邮箱池模式下缺少 IMAP 凭据（refresh_token 或 password），无法获取验证码');
+        }
+
+        console.log(`📨 [IMAP] 正在为 ${normalizedEmail} 获取验证码（邮箱池 IMAP）...`);
+        const onBeforePoll = typeof options.onBeforePoll === 'function' ? options.onBeforePoll : null;
+
+        for (let i = 0; i < maxRetries; i++) {
+            if (i === 0 || (i + 1) % 5 === 0 || i + 1 === maxRetries) {
+                console.log(`📨 [IMAP] 轮询中 ${i + 1}/${maxRetries}...`);
+            }
+
+            if (onBeforePoll) {
+                const recovered = await onBeforePoll(i + 1);
+                if (recovered) {
+                    console.log('📨 [IMAP] 页面已恢复，继续等待新验证码...');
+                }
+            }
+
+            try {
+                const code = await poolEmailImap.fetchLatestOpenAiOtpOnce({
+                    email: normalizedEmail,
+                    password: poolPassword,
+                    clientId: poolClientId,
+                    refreshToken: poolRefreshToken,
+                    host: poolHost,
+                    includeJunk,
+                    excludeCode
+                });
+                if (code) {
+                    console.log(`📨 [IMAP] 已获取验证码: ${code}`);
+                    return code;
+                }
+            } catch (err) {
+                console.warn(`📨 [IMAP] 本次轮询失败: ${err.message || err}`);
+            }
+
+            await sleep(5000);
+        }
+        throw new Error('获取验证码超时');
     }
 
     console.log(`📨 [IMAP] 正在为 ${normalizedEmail} 获取验证码...`);
@@ -869,7 +919,26 @@ async function runFullProtocolFlow(email) {
         }
 
         browser = await chromium.launch(launchOptions);
-        const context = await browser.newContext();
+        let context;
+
+        // 普号提取模式：加载注册时保存的完整浏览器状态复用session
+        if (process.env.FREE_TOKEN_FLOW === '1') {
+            try {
+                const statePath = `/tmp/free_token_state_${email.replace(/[^a-zA-Z0-9]/g, '_')}.json`;
+                if (fs.existsSync(statePath)) {
+                    context = await browser.newContext({ storageState: statePath });
+                    console.log(`[FreeToken] 已加载浏览器完整状态: ${statePath}`);
+                } else {
+                    context = await browser.newContext();
+                }
+            } catch (stateErr) {
+                console.warn(`[FreeToken] 加载浏览器状态失败: ${stateErr.message}`);
+                context = await browser.newContext();
+            }
+        } else {
+            context = await browser.newContext();
+        }
+
         page = await context.newPage();
 
         console.log("🔐 [Step 1] 正在处理授权登录...");
@@ -877,20 +946,54 @@ async function runFullProtocolFlow(email) {
         await recoverConnectionClosed(page, authUrl);
         await recoverOperationTimeout(page, email, authUrl);
 
-        await sleep(Math.random() * 2000 + 1000);
-        await recoverConnectionClosed(page, authUrl);
-        await recoverOperationTimeout(page, email, authUrl);
-        await humanType(page, 'input[type="email"]', email);
-        await sleep(Math.random() * 1000 + 500);
-        await humanClick(page, 'button[type="submit"]');
+        // 普号提取模式：检测是否已登录（复用session）
+        let isAlreadyLoggedIn = false;
+        let isAlreadyAuthorized = false;
+        if (process.env.FREE_TOKEN_FLOW === '1') {
+            await sleep(3000);
+            const currentUrl = page.url();
+            const bodyText = String(await page.textContent('body', { timeout: 3000 }).catch(() => '') || '');
+            // 已授权完成：直接跳转到回调URL
+            if (currentUrl.includes('localhost:1455/auth/callback')) {
+                isAlreadyLoggedIn = true;
+                isAlreadyAuthorized = true;
+                console.log('✅ [FreeToken] 检测到已授权完成，直接提取code');
+            } else if (!currentUrl.includes('/authorize') && !bodyText.includes('Continue with') && !bodyText.includes('Welcome back')) {
+                isAlreadyLoggedIn = true;
+                console.log('✅ [FreeToken] 检测到已登录，跳过登录步骤');
+            } else {
+                console.log('⚠️ [FreeToken] 未检测到登录状态，需要重新登录');
+            }
+        }
 
-        await sleep(Math.random() * 2000 + 1000);
-        await recoverConnectionClosed(page, authUrl);
-        await recoverOperationTimeout(page, email, authUrl);
-        await submitOtpWithRetry(page, email, MAX_OTP_RETRIES, {
-            beforeAttempt: async () => recoverOperationTimeout(page, email, authUrl)
-        });
-        await assertNotAddPhoneRequired(page);
+        if (!isAlreadyLoggedIn) {
+            await sleep(Math.random() * 2000 + 1000);
+            await recoverConnectionClosed(page, authUrl);
+            await recoverOperationTimeout(page, email, authUrl);
+            await humanType(page, 'input[type="email"]', email);
+            await sleep(Math.random() * 1000 + 500);
+            await humanClick(page, 'button[type="submit"]');
+
+            await sleep(Math.random() * 2000 + 1000);
+            await recoverConnectionClosed(page, authUrl);
+            await recoverOperationTimeout(page, email, authUrl);
+            await submitOtpWithRetry(page, email, MAX_OTP_RETRIES, {
+                beforeAttempt: async () => recoverOperationTimeout(page, email, authUrl)
+            });
+            await assertNotAddPhoneRequired(page);
+        }
+
+        if (isAlreadyAuthorized) {
+            // 已授权完成，直接从当前URL提取code
+            const currentUrl = page.url();
+            const code = new URL(currentUrl).searchParams.get('code');
+            if (code) {
+                console.log('✅ [FreeToken] 已从回调URL提取code');
+                const result = await exchangeToken(code, verifier, email, proxyValue);
+                return result;
+            }
+            throw new Error('已授权完成但未获取到code');
+        }
 
         console.log("✍️  [Step 2] 正在确认授权...");
         await page.waitForTimeout(2000);
