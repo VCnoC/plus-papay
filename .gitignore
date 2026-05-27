@@ -38,5 +38,11 @@ Thumbs.db
 *.sqlite
 *.db
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
 # Sister project (kept as a separate repo)
 plus_gopay/
