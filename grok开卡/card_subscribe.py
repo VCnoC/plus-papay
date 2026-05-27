@@ -1,5 +1,5 @@
 """用卡开通 Grok Pro trial 订阅
-用法: python card_subscribe.py --sso <token> --card <卡号> --exp <MM/YY> --cvc <CVC>
+用法: python card_subscribe.py --sso <token> --card <卡号> --exp <MM/YY> --cvc <CVC> --name <姓名> --zip <ZIP>
 """
 import sys, os, json, time, uuid, re, argparse
 sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
@@ -85,7 +85,7 @@ def solve_hcaptcha(site_key, page_url, rqdata, max_retries=3):
     return None
 
 
-def subscribe(sso, card_number, exp_month, exp_year, cvc, proxy=None):
+def subscribe(sso, card_number, exp_month, exp_year, cvc, billing_name, billing_zip, proxy=None):
     proxies = {'https': proxy, 'http': proxy} if proxy else {}
     cookies = {'sso': sso, 'sso-rw': sso}
     gh = {'accept': '*/*', 'content-type': 'application/json', 'origin': 'https://grok.com', 'referer': 'https://grok.com/'}
@@ -154,8 +154,8 @@ def subscribe(sso, card_number, exp_month, exp_year, cvc, proxy=None):
     pm_r = s.post('https://api.stripe.com/v1/payment_methods', data={
         'type':'card','card[number]':card_number,
         'card[exp_month]':exp_month,'card[exp_year]':exp_year,'card[cvc]':cvc,
-        'billing_details[name]':'John Smith',
-        'billing_details[address][country]':'US','billing_details[address][postal_code]':'10001',
+        'billing_details[name]':billing_name,
+        'billing_details[address][country]':'US','billing_details[address][postal_code]':billing_zip,
         'key':PK,'guid':guid,'muid':muid,'sid':sid_fp,
     }, timeout=15)
     if pm_r.status_code != 200:
@@ -226,6 +226,8 @@ if __name__ == '__main__':
     parser.add_argument('--card', required=True)
     parser.add_argument('--exp', required=True, help='MM/YY')
     parser.add_argument('--cvc', required=True)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--zip', required=True)
     parser.add_argument('--proxy', default='http://127.0.0.1:10808')
     args = parser.parse_args()
 
@@ -234,5 +236,5 @@ if __name__ == '__main__':
     exp_year = '20' + exp_parts[1] if len(exp_parts[1]) == 2 else exp_parts[1]
 
     print(f'Card: ...{args.card[-4:]} Exp: {exp_month}/{exp_year}')
-    result = subscribe(args.sso, args.card, exp_month, exp_year, args.cvc, args.proxy)
+    result = subscribe(args.sso, args.card, exp_month, exp_year, args.cvc, args.name, args.zip, args.proxy)
     print(json.dumps(result, indent=2, ensure_ascii=False))

@@ -65,6 +65,8 @@ function normalizeExp(rawExp, expMonth, expYear) {
  * @param {string} [opts.expMonth]      - 月份（与 exp 二选一）
  * @param {string} [opts.expYear]       - 年份（与 exp 二选一）
  * @param {string} opts.cvc             - CVC
+ * @param {string} opts.billingName     - 持卡人姓名
+ * @param {string} opts.billingZip      - ZIP / 邮编
  * @param {string} [opts.proxy]         - 代理 URL（可空）
  * @param {string} [opts.yesCaptchaKey] - YesCaptcha key（不传则读 env）
  * @param {(evt:{kind:string,text:string,step?:number})=>void} [opts.onLog]
@@ -75,6 +77,7 @@ async function subscribeGrokPro(opts) {
     const {
         sso, cardNumber, cvc,
         exp, expMonth, expYear,
+        billingName, billingZip,
         proxy = '',
         yesCaptchaKey = '',
         onLog = () => {},
@@ -84,6 +87,8 @@ async function subscribeGrokPro(opts) {
     if (!sso) throw new Error('sso 必填');
     if (!cardNumber) throw new Error('cardNumber 必填');
     if (!cvc) throw new Error('cvc 必填');
+    if (!billingName) throw new Error('billingName 必填');
+    if (!billingZip) throw new Error('billingZip 必填');
     if (!fs.existsSync(PY_SCRIPT)) throw new Error(`Python 脚本不存在: ${PY_SCRIPT}`);
 
     const finalExp = normalizeExp(exp, expMonth, expYear);
@@ -97,6 +102,8 @@ async function subscribeGrokPro(opts) {
         '--card', String(cardNumber),
         '--exp', finalExp,
         '--cvc', String(cvc),
+        '--name', String(billingName),
+        '--zip', String(billingZip),
     ];
     if (proxy) {
         args.push('--proxy', String(proxy));

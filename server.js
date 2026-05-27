@@ -980,6 +980,24 @@ function unsubscribeTaskClient(jobKey, ws) {
 }
 
 async function sendTaskSnapshot(ws, jobKey) {
+    if (String(jobKey || '').startsWith('grok-') && grokJobs.has(jobKey)) {
+        const job = grokJobs.get(jobKey);
+        if (!job || ws.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        ws.send(JSON.stringify({
+            type: 'grok_snapshot',
+            jobKey,
+            status: job.status,
+            message: job.message,
+            cardLast4: job.cardLast4,
+            proxy: job.proxy,
+            logs: job.logs.slice(-200),
+            isTerminal: TERMINAL_TASK_STATUSES.has(job.status)
+        }));
+        return;
+    }
+
     const task = await store.getTaskStatus(jobKey);
     if (!task || ws.readyState !== WebSocket.OPEN) {
         return;
@@ -2479,6 +2497,7 @@ app.post('/api/admin/products/resume', async (req, res) => {
 // Grok Pro 开号（用卡订阅）—— 包装 grok开卡/card_subscribe.py
 // ============================================================
 const { subscribeGrokPro } = require('./grok-subscribe');
+const { generateFakeVisaCard } = require('./grok开卡/fake-card-generator');
 
 // In-memory 任务表（jobKey -> {status,message,result,logs,startedAt,finishedAt}）
 const grokJobs = new Map();
@@ -2534,12 +2553,28 @@ app.post('/api/admin/grok/subscribe', async (req, res) => {
 
         const body = req.body || {};
         const sso = String(body.sso || '').trim();
-        const cvc = String(body.cvc || '').trim();
-        const exp = String(body.exp || '').trim();
-        let cardNumber = String(body.cardNumber || body.card || '').replace(/\s+/g, '');
+        const billingName = String(body.billingName || body.name || '').trim();
+        const billingZip = String(body.billingZip || body.zip || '').trim();
+
+        // 🆕 本地假卡生成器分支（cardSource=fake 时由后端 Luhn 算法生成，忽略前端卡参数）
+        // ⚠️ 仅用于测试/流程验证：Stripe Live 真实风控大概率会拒绝（card_declined）
+        const isFakeCard = String(body.cardSource || '').toLowerCase() === 'fake';
+        let cvc;
+        let exp;
+        let cardNumber;
+        if (isFakeCard) {
+            const fake = generateFakeVisaCard();
+            cardNumber = fake.number;
+            exp = fake.expiry;   // "MM/YY"
+            cvc = fake.cvv;
+        } else {
+            cvc = String(body.cvc || '').trim();
+            exp = String(body.exp || '').trim();
+            cardNumber = String(body.cardNumber || body.card || '').replace(/\s+/g, '');
+        }
         let cardExp = exp;
 
-        // 支持从卡池按 index 选卡
+        // 支持从卡池按 index 选卡（fake 模式已自带卡参数，不会进入此分支）
         if (!cardNumber || !cardExp || !cvc) {
             const idx = Number(body.cardIndex);
             if (Number.isInteger(idx) && idx >= 0) {
@@ -2561,6 +2596,8 @@ app.post('/api/admin/grok/subscribe', async (req, res) => {
         if (!cardNumber) return res.status(400).json({ success: false, message: '缺少卡号' });
         if (!cardExp) return res.status(400).json({ success: false, message: '缺少过期日期 (MM/YY)' });
         if (!cvc) return res.status(400).json({ success: false, message: '缺少 CVC' });
+        if (!billingName) return res.status(400).json({ success: false, message: '缺少姓名' });
+        if (!billingZip) return res.status(400).json({ success: false, message: '缺少 ZIP' });
 
         // 代理优先用 body.proxy，否则从全局代理池随机
         let proxy = String(body.proxy || '').trim();
@@ -2600,6 +2637,9 @@ app.post('/api/admin/grok/subscribe', async (req, res) => {
                 broadcastToTask(jobKey, { type: 'grok_log', jobKey, ...evt });
             };
             pushLog('info', `🚀 Grok 开通启动 卡尾号 ...${cardNumber.slice(-4)} 代理 ${job.proxy || '(直连)'}`);
+            if (isFakeCard) {
+                pushLog('warn', `[fake-card] ⚠️ 已启用本地假卡生成器（Luhn Visa） 卡号 ...${cardNumber.slice(-4)} 过期 ${cardExp}，Stripe Live 风控大概率会拒（card_declined），仅供测试/流程验证`);
+            }
             if (!yesCaptchaKey) {
                 pushLog('warn', '⚠️ 未配置 YESCAPTCHA_KEY，若触发 hCaptcha 将失败');
             }
@@ -2609,6 +2649,8 @@ app.post('/api/admin/grok/subscribe', async (req, res) => {
                     cardNumber,
                     exp: cardExp,
                     cvc,
+                    billingName,
+                    billingZip,
                     proxy,
                     yesCaptchaKey,
                     timeoutMs: 5 * 60 * 1000,

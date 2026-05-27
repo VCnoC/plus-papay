@@ -2516,6 +2516,19 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                     </div>
 
                     <div class="form-group" style="margin-top: 18px;">
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                            <div class="form-group" style="margin: 0;">
+                                <label>姓名 <span style="color: var(--danger);">*</span></label>
+                                <input id="grok_billing_name" class="asset-input" placeholder="John Smith">
+                            </div>
+                            <div class="form-group" style="margin: 0;">
+                                <label>ZIP <span style="color: var(--danger);">*</span></label>
+                                <input id="grok_billing_zip" class="asset-input" placeholder="10001" maxlength="12">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group" style="margin-top: 18px;">
                         <label>银行卡来源</label>
                         <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
                             <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
@@ -2526,9 +2539,24 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                                 <input type="radio" name="grok_card_source" value="pool" onchange="onGrokCardSourceChange()">
                                 <span>从「银行卡池」选择</span>
                             </label>
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                <input type="radio" name="grok_card_source" value="fake" onchange="onGrokCardSourceChange()">
+                                <span>本地假卡生成器（测试用）</span>
+                            </label>
                             <button type="button" class="btn btn-success" style="padding:6px 12px; font-size:13px;" onclick="loadGrokCardOptions()">
                                 <i data-lucide="refresh-cw"></i> 刷新卡池
                             </button>
+                        </div>
+                    </div>
+
+                    <div id="grok_card_fake_wrap" style="margin-top: 12px; display: none;">
+                        <div style="padding: 12px 14px; border-radius: 8px; background: rgba(251, 191, 36, 0.08); border: 1px dashed rgba(251, 191, 36, 0.4); color: #fbbf24; font-size: 13px; line-height: 1.6;">
+                            <div style="font-weight: 600; margin-bottom: 4px;">⚠️ 本地假卡生成器（Luhn Visa）</div>
+                            <div style="color: var(--text-dim);">
+                                提交时由后端用 Luhn 算法生成 Visa 卡号（前缀 4147/4100，未来 2~5 年随机过期，CVV 随机）。<br>
+                                <strong style="color:#fbbf24;">此模式仅用于测试/流程验证</strong>，Stripe Live 真实风控大概率会拒（card_declined）。<br>
+                                无需填写任何卡号、过期或 CVC。
+                            </div>
                         </div>
                     </div>
 
@@ -5010,6 +5038,8 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
             const src = document.querySelector('input[name="grok_card_source"]:checked')?.value || 'manual';
             document.getElementById('grok_card_manual').style.display = src === 'manual' ? 'block' : 'none';
             document.getElementById('grok_card_pool_wrap').style.display = src === 'pool' ? 'block' : 'none';
+            const fakeWrap = document.getElementById('grok_card_fake_wrap');
+            if (fakeWrap) fakeWrap.style.display = src === 'fake' ? 'block' : 'none';
             if (src === 'pool') loadGrokCardOptions();
         }
 
@@ -5086,9 +5116,12 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
         async function startGrokSubscribe(btn) {
             const sso = document.getElementById('grok_sso').value.trim();
             if (!sso) { showMessage('请填写 Grok SSO Token', 'warning'); return; }
+            const billingName = document.getElementById('grok_billing_name').value.trim();
+            const billingZip = document.getElementById('grok_billing_zip').value.trim();
+            if (!billingName || !billingZip) { showMessage('请填写姓名 / ZIP', 'warning'); return; }
 
             const src = document.querySelector('input[name="grok_card_source"]:checked')?.value || 'manual';
-            const payload = { sso };
+            const payload = { sso, billingName, billingZip };
             if (src === 'manual') {
                 const card = document.getElementById('grok_card_number').value.replace(/\s+/g, '');
                 const exp = document.getElementById('grok_card_exp').value.trim();
@@ -5097,6 +5130,9 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                 payload.cardNumber = card;
                 payload.exp = exp;
                 payload.cvc = cvc;
+            } else if (src === 'fake') {
+                // 后端 Luhn 生成假卡，前端不需要传任何卡参数
+                payload.cardSource = 'fake';
             } else {
                 const idx = document.getElementById('grok_card_pool_select').value;
                 const cvc = document.getElementById('grok_pool_cvc').value.trim();
@@ -5179,16 +5215,21 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                         grokSocket.send(JSON.stringify({ type: 'subscribe', jobKey: data.jobKey }));
                         startHb();
                     };
-                    grokSocket.onmessage = (event) => {
-                        try {
-                            const m = JSON.parse(event.data);
-                            if (m.type === 'pong') { scheduleHbTimeout(); return; }
-                            if (m.jobKey && m.jobKey !== data.jobKey) return;
-                            scheduleHbTimeout();
-                            if (m.type === 'grok_log') {
-                                appendGrokLog(m.kind || 'log', m.text || '', { ts: m.ts, step: m.step });
-                                if (m.kind === 'step') {
-                                    const stepMatch = (m.text || '').match(/\[(\d+)\/(\d+)\]/) || (m.step ? [null, m.step, 6] : null);
+	                    grokSocket.onmessage = (event) => {
+	                        try {
+	                            const m = JSON.parse(event.data);
+	                            if (m.type === 'pong') { scheduleHbTimeout(); return; }
+	                            if (m.jobKey && m.jobKey !== data.jobKey) return;
+	                            scheduleHbTimeout();
+	                            if (m.type === 'grok_snapshot') {
+	                                if (m.proxy !== undefined) appendGrokLog('info', `代理: ${m.proxy || '(直连)'}`);
+	                                (m.logs || []).forEach((log) => appendGrokLog(log.kind || 'log', log.text || '', { ts: log.ts, step: log.step }));
+	                                if (m.status === 'success') finish(true, m.message);
+	                                else if (m.status === 'failed' || m.status === 'error') finish(false, m.message);
+	                            } else if (m.type === 'grok_log') {
+	                                appendGrokLog(m.kind || 'log', m.text || '', { ts: m.ts, step: m.step });
+	                                if (m.kind === 'step') {
+	                                    const stepMatch = (m.text || '').match(/\[(\d+)\/(\d+)\]/) || (m.step ? [null, m.step, 6] : null);
                                     if (stepMatch) {
                                         const cur = Number(stepMatch[1]);
                                         const total = Number(stepMatch[2] || 6);
