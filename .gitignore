@@ -46,3 +46,6 @@ __pycache__/
 
 # Sister project (kept as a separate repo)
 plus_gopay/
+.backup_before_supply_split/
+*.bak.*
+supply_files/

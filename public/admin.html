@@ -1574,6 +1574,11 @@
                 <i data-lucide="zap"></i>
                 <span>提取普号</span>
             </div>
+
+            <div class="nav-item" onclick="switchPage('token_supply', this)">
+                <i data-lucide="bell-plus"></i>
+                <span>token补号</span>
+            </div>
             <div class="nav-item" onclick="switchPage('grok_subscribe', this)">
                 <i data-lucide="sparkles"></i>
                 <span>Grok 开号</span>
@@ -2490,6 +2495,103 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
                     </table>
                 </div>
                 <div id="free_product_pagination" class="table-footer"></div>
+            </div>
+        </div>
+
+
+        <!-- token补号 -->
+        <div id="token_supply" class="page-view">
+            <div class="page-header">
+                <h1>token补号</h1>
+                <p>三种提取模式：注册→RT（OAuth refresh_token）、注册→RC（网页 cookie）、老号→RT（已注册邮箱）</p>
+            </div>
+            <div class="panel">
+                <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; flex-wrap: wrap; gap: 12px;">
+                    <div class="panel-title">token补号批量提取（三模式独立）</div>
+                    <div class="panel-actions" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                        <input type="number" id="supply_gen_count" value="1" min="1" class="asset-input" style="width: 80px;" placeholder="数量">
+                        <button class="btn btn-primary" onclick="startSupplyTokenGeneration(this, 'rt')" title="注册 OpenAI → OAuth → refresh_token，输出 product_files/refresh_tokens_register.txt">
+                            <i data-lucide="key-round"></i>
+                            注册→RT
+                        </button>
+                        <button class="btn btn-primary" onclick="startSupplyTokenGeneration(this, 'rc')" title="注册 OpenAI → 抓 __Secure-next-auth.session-token cookie，输出 product_files/refresh_cookies.txt">
+                            <i data-lucide="cookie"></i>
+                            注册→RC
+                        </button>
+                        <button class="btn btn-primary" onclick="startSupplyTokenGeneration(this, 'existing_rt')" title="对 pool_emails 中已注册的老号走 OAuth → refresh_token，输出 product_files/refresh_tokens_existing.txt">
+                            <i data-lucide="rotate-cw"></i>
+                            老号→RT
+                        </button>
+                    </div>
+                </div>
+
+                <div id="supply_gen_progress_container" class="panel" style="display: none; margin-bottom: 24px; background: rgba(255, 255, 255, 0.02); border: 1px dashed rgba(255, 255, 255, 0.1);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;">
+                        <span id="supply_gen_status" style="font-size: 14px; color: var(--text-main); font-weight: 600;">正在准备...</span>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <button type="button" class="btn btn-delete" id="supply_gen_stop_btn" style="display: none;" onclick="stopAdminProductBatch({ useCurrentJob: true })">
+                                <i data-lucide="square"></i> 停止提取
+                            </button>
+                            <span id="supply_gen_percent" style="font-size: 14px; color: var(--accent); font-weight: 700;">0%</span>
+                        </div>
+                    </div>
+                    <div style="width: 100%; height: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 4px; overflow: hidden;">
+                        <div id="supply_gen_bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--accent), #a855f7); transition: width 0.3s ease;"></div>
+                    </div>
+                    <div id="supply_gen_download" style="display: none; margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap;">
+                        <button class="btn btn-success" onclick="downloadSupplyBatchZip()">
+                            <i data-lucide="download"></i> 下载本批次文件
+                        </button>
+                        <button id="supply_gen_sub2api_btn" class="btn btn-primary" onclick="downloadSupplyBatchSub2api()" style="display: none;">
+                            <i data-lucide="file-json"></i> 下载 sub2api JSON
+                        </button>
+                    </div>
+                </div>
+
+                <div class="batch-actions" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 16px;">
+                    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                        <input type="text" id="supply_product_search" class="asset-input" placeholder="搜索邮箱账号" style="width: 220px;" oninput="handleSupplyProductSearch(this.value)">
+                        <div class="filter-dropdown" data-filter="supply_product">
+                            <button class="filter-trigger" onclick="toggleFilterMenu('supply_product')"><span>全部状态</span><i data-lucide="chevron-down"></i></button>
+                            <div class="filter-menu">
+                                <button class="filter-option active" onclick="selectFilter('supply_product', 'all', '全部状态')">全部状态</button>
+                                <button class="filter-option" onclick="selectFilter('supply_product', 'status_normal', '正常')">正常</button>
+                                <button class="filter-option" onclick="selectFilter('supply_product', 'status_disabled', '封禁')">封禁</button>
+                                <button class="filter-option" onclick="selectFilter('supply_product', 'shipped', '已出库')">已出库</button>
+                                <button class="filter-option" onclick="selectFilter('supply_product', 'unshipped', '未出库')">未出库</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                        <button class="btn btn-success" onclick="togglePageSelection('supply_product')">
+                            <i data-lucide="check-square"></i>
+                            本页全选/取消
+                        </button>
+                        <button class="btn btn-success" onclick="batchExportSupplyProducts()">
+                            <i data-lucide="download"></i>
+                            批量出库
+                        </button>
+                    </div>
+                </div>
+
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="select-header" width="60px">选择</th>
+                                <th>邮箱账号</th>
+                                <th width="150px">使用CDK</th>
+                                <th width="180px">KEY</th>
+                                <th width="200px">生产时间</th>
+                                <th width="100px" style="text-align:center">状态</th>
+                                <th width="100px" style="text-align:center">出库</th>
+                                <th width="150px" style="text-align:center">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="supply_product_body"></tbody>
+                    </table>
+                </div>
+                <div id="supply_product_pagination" class="table-footer"></div>
             </div>
         </div>
 
@@ -5304,6 +5406,185 @@ http://USER-session-{session}:PASS@your-proxy.example.com:1000"></textarea>
             if (!jobKey) { showMessage('无可用 sub2api 下载链接（仅模式 B 生成）', 'warn'); return; }
             const a = document.createElement('a');
             a.href = `/api/admin/products/sub2api-download/${encodeURIComponent(jobKey)}?token=${encodeURIComponent(getAdminToken() || '')}`;
+            a.download = `sub2api_${jobKey}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+
+        // ─── 以下是 "token补号" tab 的克隆 JS（与 free_tokens 同源）───
+
+        async function startSupplyTokenGeneration(btn, mode) {
+            const safeMode = (['rt', 'rc', 'existing_rt'].includes(String(mode || '').toLowerCase()))
+                ? String(mode).toLowerCase()
+                : 'rt';
+            const modeLabel = safeMode === 'rc' ? 'RC（cookie）' : (safeMode === 'existing_rt' ? '老号→RT' : 'RT');
+            const apiPath = safeMode === 'rc'
+                ? '/api/admin/products/generate-supply-rc'
+                : (safeMode === 'existing_rt'
+                    ? '/api/admin/products/generate-supply-existing-rt'
+                    : '/api/admin/products/generate-supply-rt');
+
+            const count = parseInt(document.getElementById('supply_gen_count').value, 10) || 1;
+            if (!btn || btn.disabled) return;
+            btn.disabled = true;
+            const orig = btn.innerHTML;
+            btn.innerHTML = '<i data-lucide="loader" class="animate-spin"></i> 提交中...';
+            lucide.createIcons();
+            try {
+                const res = await authFetch(apiPath, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ count, mode: safeMode }) });
+                const data = await res.json();
+                if (!res.ok || data.success === false) throw new Error(data.message || '启动失败');
+                const c = document.getElementById('supply_gen_progress_container');
+                const s = document.getElementById('supply_gen_status');
+                const p = document.getElementById('supply_gen_percent');
+                const b = document.getElementById('supply_gen_bar');
+                const stop = document.getElementById('supply_gen_stop_btn');
+                if (c) c.style.display = 'block';
+                if (s) s.textContent = `正在提取 ${count} 个补号 ${modeLabel}...`;
+                if (p) p.textContent = '0%';
+                if (b) { b.style.width = '0%'; b.style.background = 'linear-gradient(90deg, var(--accent), #a855f7)'; }
+                if (stop) stop.style.display = 'inline-flex';
+                window.__adminProductGenJobKey = data.jobKey;
+
+                // === WebSocket 进度监听（与成品号池一致）===
+                const wsHeartbeatIntervalMs = 5000;
+                const wsHeartbeatTimeoutMs = 12000;
+                let socket = null, settled = false;
+                let heartbeatInterval = null, heartbeatTimeout = null, reconnectTimer = null;
+                const clearHb = () => {
+                    clearInterval(heartbeatInterval); clearTimeout(heartbeatTimeout);
+                    heartbeatInterval = null; heartbeatTimeout = null;
+                };
+                const scheduleHbTimeout = () => {
+                    clearTimeout(heartbeatTimeout);
+                    heartbeatTimeout = setTimeout(() => {
+                        if (socket && !settled) { try { socket.close(); } catch (_) {} }
+                    }, wsHeartbeatTimeoutMs);
+                };
+                const startHb = () => {
+                    clearHb(); scheduleHbTimeout();
+                    heartbeatInterval = setInterval(() => {
+                        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+                        try { socket.send(JSON.stringify({ type: 'ping', ts: Date.now() })); scheduleHbTimeout(); }
+                        catch (e) { console.error('Free token ws ping failed', e); }
+                    }, wsHeartbeatIntervalMs);
+                };
+                const cleanupSocket = () => {
+                    clearHb(); clearTimeout(reconnectTimer); reconnectTimer = null;
+                    if (socket) { try { socket.close(); } catch (_) {} }
+                    socket = null;
+                };
+                const finish = async (message, isSuccess, zipPath) => {
+                    if (settled) return;
+                    settled = true; cleanupSocket();
+                    window.__adminProductGenJobKey = '';
+                    if (stop) stop.style.display = 'none';
+                    if (s) s.textContent = message;
+                    if (b) b.style.background = isSuccess ? 'var(--success)' : 'var(--danger)';
+                    const dl = document.getElementById('supply_gen_download');
+                    if (dl) {
+                        // 🆕 只要后端打包好了 zip，就允许下载（即使任务标记 failed，
+                        //    比如池子耗尽时只完成了 1000/1300 也要给VC酱拿到那 1000 个）
+                        if (zipPath) {
+                            dl.style.display = 'flex';
+                            dl.dataset.zipJobKey = data.jobKey;
+                            // 🆕 [PATCH-Sub2API] 仅模式 B (rc) 才生成 sub2api JSON
+                            const subBtn = document.getElementById('supply_gen_sub2api_btn');
+                            if (subBtn) {
+                                if (safeMode === 'rc') {
+                                    subBtn.style.display = 'inline-flex';
+                                    subBtn.dataset.zipJobKey = data.jobKey;
+                                } else {
+                                    subBtn.style.display = 'none';
+                                    subBtn.dataset.zipJobKey = '';
+                                }
+                            }
+                        } else {
+                            dl.style.display = 'none';
+                            dl.dataset.zipJobKey = '';
+                            const subBtn = document.getElementById('supply_gen_sub2api_btn');
+                            if (subBtn) { subBtn.style.display = 'none'; subBtn.dataset.zipJobKey = ''; }
+                        }
+                    }
+                    btn.disabled = false; btn.innerHTML = orig; lucide.createIcons();
+                    await loadData();
+                };
+                const connectSocket = () => {
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    socket = new WebSocket(`${protocol}//${window.location.host}`);
+                    socket.onopen = () => {
+                        clearTimeout(reconnectTimer); reconnectTimer = null;
+                        socket.send(JSON.stringify({ type: 'subscribe', jobKey: data.jobKey }));
+                        startHb();
+                    };
+                    socket.onmessage = async (event) => {
+                        try {
+                            const payload = JSON.parse(event.data);
+                            if (payload.type === 'pong') { scheduleHbTimeout(); return; }
+                            if (payload.jobKey !== data.jobKey) return;
+                            scheduleHbTimeout();
+                            const progress = Math.max(0, Math.min(100, Math.round(Number(payload.progress) || 0)));
+                            if (b) b.style.width = `${progress}%`;
+                            if (p) p.textContent = `${progress}%`;
+                            if (payload.message && s) s.textContent = payload.message;
+                            if (payload.status === 'success') {
+                                await finish(payload.message || `成功提取 ${count} 个补号 RT！`, true, payload.zipPath);
+                            } else if (payload.status === 'failed' || payload.status === 'maintenance') {
+                                // 🆕 失败/维护态也要传 zipPath，已成功的号才能让VC酱下载
+                                await finish(payload.message || '补号提取失败', false, payload.zipPath);
+                            }
+                        } catch (error) { console.error('Free token ws parse failed', error); }
+                    };
+                    socket.onclose = () => {
+                        clearHb(); socket = null;
+                        if (!settled) {
+                            if (s) s.textContent = '连接中断，正在重连...';
+                            clearTimeout(reconnectTimer);
+                            reconnectTimer = setTimeout(connectSocket, 3000);
+                        }
+                    };
+                    socket.onerror = (error) => { console.error('Free token ws error', error); };
+                };
+                connectSocket();
+                // === WebSocket end ===
+
+                showMessage(data.message || '补号提取任务已启动', 'success');
+            } catch (e) {
+                window.__adminProductGenJobKey = '';
+                showMessage(e.message || '启动失败', 'error');
+            } finally {
+                if (!window.__adminProductGenJobKey) {
+                    btn.disabled = false; btn.innerHTML = orig; lucide.createIcons();
+                }
+            }
+        }
+
+        function handleSupplyProductSearch(query) { /* 复用成品号池搜索 */ }
+        async function batchExportSupplyProducts() { showMessage('请到成品号池页面操作', 'warning'); }
+
+        async function batchExportSupplyProducts() { showMessage('请到成品号池页面操作', 'warning'); }
+
+
+        function downloadSupplyBatchZip() {
+            const dl = document.getElementById('supply_gen_download');
+            const jobKey = dl?.dataset?.zipJobKey;
+            if (!jobKey) { showMessage('无可用下载链接', 'warn'); return; }
+            const a = document.createElement('a');
+            a.href = `/api/admin/products/supply-download/${encodeURIComponent(jobKey)}?token=${encodeURIComponent(getAdminToken() || '')}`;
+            a.download = `free_${jobKey}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        function downloadSupplyBatchSub2api() {
+            const subBtn = document.getElementById('supply_gen_sub2api_btn');
+            const jobKey = subBtn?.dataset?.zipJobKey;
+            if (!jobKey) { showMessage('无可用 sub2api 下载链接（仅模式 B 生成）', 'warn'); return; }
+            const a = document.createElement('a');
+            a.href = `/api/admin/products/supply-sub2api-download/${encodeURIComponent(jobKey)}?token=${encodeURIComponent(getAdminToken() || '')}`;
             a.download = `sub2api_${jobKey}.json`;
             document.body.appendChild(a);
             a.click();

@@ -871,7 +871,7 @@ async function startAdminProductGenerationTask(count, options = {}) {
                             }, { jobKey: task.jobKey });
 
                             if (result?.success) {
-                                await store.addProduct(result.email, result.sub2apiPath || result.sub2apiFile || '', null, null, result.imapKey || null);
+                                await (process.env.SUPPLY_MODE === '1' ? store.addSupplyProduct : store.addProduct)(result.email, result.sub2apiPath || result.sub2apiFile || '', null, null, result.imapKey || null);
                                 successCount += 1;
                                 produced = true;
                                 logTask(task.jobKey, `第 ${currentIndex}/${targetCount} 个成品号生产成功 email=${result.email}`);
@@ -2464,6 +2464,451 @@ app.post('/api/admin/products/generate-free-rt', authenticateAdmin, makeFreeToke
 app.post('/api/admin/products/generate-free-rc', authenticateAdmin, makeFreeTokenHandler('rc', '普号提取-注册→RC'));
 app.post('/api/admin/products/generate-free-existing-rt', authenticateAdmin, makeFreeTokenHandler('existing_rt', '普号提取-老号→RT'));
 
+
+// ════════════════════════════════════════════════════════════════
+// 以下为 token补号 tab 的完全独立后端（与 free_tokens / products 同源克隆）
+// ════════════════════════════════════════════════════════════════
+
+async function startAdminSupplyTokenGeneration(count, workers, mode = 'rt') {
+    process.env.SUPPLY_MODE = '1';
+    const safeMode = (['rt', 'rc', 'existing_rt'].includes(String(mode || '').toLowerCase()))
+        ? String(mode).toLowerCase()
+        : 'rt';
+    const modeUpper = safeMode.toUpperCase();
+    const modeLabel = safeMode === 'rc' ? 'RC' : (safeMode === 'existing_rt' ? '老号RT' : 'RT');
+    const tokenPreview = `FREE_${modeUpper}_GEN`;
+    const cdkPrefix = `FREE_${modeUpper}_GEN`;
+
+    const targetCount = Math.max(1, Number(count) || 1);
+    const maxConcurrent = Math.min(targetCount, Math.max(1, Number(workers) || 1));
+    const workerCount = maxConcurrent;
+    const task = await store.createTaskLog({
+        tokenPreview,
+        cdkCode: `${cdkPrefix}:${targetCount}`,
+        status: 'running',
+        progress: 1
+    });
+
+    const itemProgress = new Map();
+    const extractedFiles = [];
+    let completed = 0, successCount = 0, failedCount = 0, nextIndex = 1;
+    let lastError = '', lastProgress = 1, aborted = false;
+
+    registerAdminGenerationStop(task.jobKey, () => { aborted = true; });
+    const buildSummary = (zipPath) => JSON.stringify({ kind: 'free_token_generation', mode: safeMode, targetCount, completedCount: completed, successCount, failedCount, workerCount, aborted, lastError, zipPath, files: extractedFiles });
+    const computeProgress = () => {
+        const inFlight = Array.from(itemProgress.values()).reduce((s, v) => s + Math.max(0, Math.min(99, Number(v) || 0)), 0);
+        return Math.max(lastProgress, Math.min(99, Math.floor(((completed * 100) + inFlight) / targetCount)));
+    };
+
+    logTask(task.jobKey, `🎬 普号提取启动 mode=${safeMode} count=${targetCount} workerCount=${workerCount}`);
+
+    (async () => {
+        const worker = async () => {
+            while (true) {
+                if (aborted) return;
+                const idx = nextIndex;
+                if (idx > targetCount) return;
+                nextIndex += 1;
+                const slotKey = `${task.jobKey}:item:${idx}`;
+                itemProgress.set(idx, 0);
+
+                try {
+                    let produced = false, attempt = 0;
+                    while (!produced) {
+                        if (aborted) return;
+                        attempt += 1;
+                        itemProgress.set(idx, 1);
+                        await store.updateTaskLog(task.jobKey, { status: 'running', message: `第 ${idx}/${targetCount} 个普号(${modeLabel})提取中 (尝试 ${attempt})...`, progress: computeProgress(), cdkCode: `${cdkPrefix}:${targetCount}`, rawOutput: buildSummary() });
+                        await waitForAvailableActivationSlot(activeBackgroundJobs, maxConcurrent);
+                        reserveBackgroundSlot(slotKey);
+
+                        try {
+                            // 🆕 [PATCH-Timeout] 每个号 5 分钟超时保护，防止数据库锁死锁
+                            const ITEM_TIMEOUT_MS = 5 * 60 * 1000;
+                            const itemPromise = startFreeTokenExtraction('', async () => {}, { jobKey: task.jobKey, mode: safeMode });
+                            const timeoutPromise = new Promise((_, reject) =>
+                                setTimeout(() => reject(new Error(`单号超时（${ITEM_TIMEOUT_MS/1000}秒）`)), ITEM_TIMEOUT_MS)
+                            );
+                            const result = await Promise.race([itemPromise, timeoutPromise]);
+                            // 成功判定：模式 A/C 看 refreshToken，模式 B 看 refreshCookie
+                            const hasOutput = (safeMode === 'rc')
+                                ? !!(result && result.refreshCookie)
+                                : !!(result && (result.refreshToken || result.fileName));
+                            if (hasOutput) {
+                                successCount += 1;
+                                produced = true;
+                                if (result.sub2apiPath) extractedFiles.push({ type: 'sub2api', path: result.sub2apiPath, name: result.sub2apiFile || path.basename(result.sub2apiPath) });
+                                if (result.cpaPath) extractedFiles.push({ type: 'cpa', path: result.cpaPath, name: result.cpaFile || path.basename(result.cpaPath) });
+                                logTask(task.jobKey, `第 ${idx}/${targetCount} 个普号(${modeLabel}) 提取成功`);
+                            } else {
+                                throw new Error('未返回有效结果');
+                            }
+                        } catch (error) {
+                            lastError = error.message || '未知错误';
+                            // 🆕 [PATCH-Timeout] 单号超时 → 强制释放锁防止下次还死锁
+                            if (lastError.includes('单号超时')) {
+                                logTask(task.jobKey, `⚠️ 第 ${idx}/${targetCount} 个超时，正在释放资产锁...`, 'warn');
+                                try { await store.resetAllAssetLocks(); } catch (_) {}
+                            }
+                            if (isFatalProductGenerationError(error)) { failedCount += 1; aborted = true; throw error; }
+                            // 🆕 [PATCH-MaxRetry] 同一格子失败 3 次就放弃这个号位（防死循环）
+                            if (attempt >= 3) {
+                                logTask(task.jobKey, `❌ 第 ${idx}/${targetCount} 个连续失败 3 次，跳过该号位继续`, 'warn');
+                                failedCount += 1;
+                                produced = true;  // 假装成功跳过，不影响其他 worker
+                                break;
+                            }
+                            logTask(task.jobKey, `第 ${idx}/${targetCount} 个(${modeLabel})非致命失败 (${attempt}/3)，准备重试: ${lastError}`, 'warn');
+                            itemProgress.set(idx, 1);
+                            await sleep(3000);
+                        } finally {
+                            releaseBackgroundSlot(slotKey);
+                        }
+                    }
+                } finally {
+                    if (!aborted) { completed += 1; itemProgress.delete(idx); }
+                }
+            }
+        };
+
+        try {
+            try {
+                await Promise.all(Array.from({ length: workerCount }, () => worker()));
+            } catch (workerErr) {
+                // 🆕 [PATCH-NoZipLost] worker 抛错时不要直接退出，要继续走打包流程
+                lastError = lastError || (workerErr.message || String(workerErr));
+                logTask(task.jobKey, `⚠️ worker 异常退出: ${lastError}（仍会尝试打包已成功的号）`, 'warn');
+            }
+
+            // 🆕 [PATCH-Download] 三模式 txt 文件加入打包清单
+            //   - 模式 A (rt)          → refresh_tokens_register_<jobKey>.txt
+            //   - 模式 B (rc)          → refresh_cookies_<jobKey>.txt + access_tokens_<jobKey>.txt
+            //   - 模式 C (existing_rt) → refresh_tokens_existing_<jobKey>.txt
+            //   优先使用本批次独立 txt（带 jobKey 后缀，每次任务独立），
+            //   找不到批次文件时回退到全局累积 txt
+            if (successCount > 0) {
+                const txtMap = {
+                    rt: ['refresh_tokens_register'],
+                    rc: ['refresh_cookies', 'access_tokens'],
+                    existing_rt: ['refresh_tokens_existing']
+                };
+                const baseList = txtMap[safeMode] || [];
+                for (const baseName of baseList) {
+                    // 优先：本批次独立文件
+                    const batchPath = path.join(__dirname, 'product_files', `${baseName}_${task.jobKey}.txt`);
+                    let chosenPath = null;
+                    let chosenName = null;
+                    try {
+                        const st = fs.statSync(batchPath);
+                        if (st && st.size > 0) {
+                            chosenPath = batchPath;
+                            chosenName = `${baseName}_${task.jobKey}.txt`;
+                        }
+                    } catch (_) { /* 没批次文件就回退 */ }
+
+                    // 回退：全局累积文件
+                    if (!chosenPath) {
+                        const globalPath = path.join(__dirname, 'product_files', `${baseName}.txt`);
+                        try {
+                            const st = fs.statSync(globalPath);
+                            if (st && st.size > 0) {
+                                chosenPath = globalPath;
+                                chosenName = `${baseName}.txt`;
+                            }
+                        } catch (_) {}
+                    }
+
+                    if (chosenPath) {
+                        extractedFiles.push({ type: 'txt', path: chosenPath, name: chosenName });
+                    }
+                }
+            }
+
+            // 🆕 [PATCH-Sub2API] 模式 B (rc) 自动生成 sub2api JSON（解码 access_token JWT 得字段）
+            //   - 仅模式 B 落盘 access_tokens.txt，A/C 没有 JWT 跳过
+            //   - 失败不影响 zip 打包流程
+            if (safeMode === 'rc' && successCount > 0) {
+                try {
+                    const atTxt = path.join(__dirname, 'product_files', `access_tokens_${task.jobKey}.txt`);
+                    if (fs.existsSync(atTxt)) {
+                        const subPath = path.join(__dirname, 'product_files', `sub2api_${task.jobKey}.json`);
+                        const { buildSub2apiFromAccessTokenFile } = require('./free_token/sub2api_export');
+                        const stats = buildSub2apiFromAccessTokenFile(atTxt, subPath);
+                        if (stats.accountCount > 0) {
+                            extractedFiles.push({ type: 'sub2api', path: subPath, name: `sub2api_${task.jobKey}.json` });
+                            logTask(task.jobKey, `📋 sub2api JSON 生成成功: ${stats.accountCount} 个账号 (输入 ${stats.inputLines} 行, 失败 ${stats.failedCount})`);
+                        } else {
+                            logTask(task.jobKey, `⚠️ sub2api JSON 跳过: 解码后无有效账号`, 'warn');
+                        }
+                    }
+                } catch (subErr) {
+                    logTask(task.jobKey, `⚠️ sub2api JSON 生成失败: ${subErr.message}（不影响 zip 打包）`, 'warn');
+                }
+            }
+
+            let zipPath = '';
+            if (extractedFiles.length > 0) {
+                try {
+                    const zipDir = path.join(__dirname, 'product_files', 'zip');
+                    fs.mkdirSync(zipDir, { recursive: true });
+                    zipPath = path.join(zipDir, `free_${task.jobKey}.zip`);
+                    // 🆕 [PATCH-Zip] 用 spawnSync 直接传文件路径数组，不依赖 @filelist 语法
+                    //    （Linux 自带 zip 不支持 @file，会报 "name not matched: @file"）
+                    const { spawnSync } = require('child_process');
+                    const filePaths = extractedFiles.map(f => f.path);
+                    const ret = spawnSync('zip', ['-j', zipPath, ...filePaths], { stdio: 'pipe' });
+                    if (ret.status !== 0) {
+                        const stderr = String(ret.stderr || '').slice(0, 200);
+                        throw new Error(`zip 退出码 ${ret.status}: ${stderr}`);
+                    }
+                    logTask(task.jobKey, `📦 已打包 ${extractedFiles.length} 个文件: ${zipPath}`);
+                } catch (zipErr) {
+                    logTask(task.jobKey, `⚠️ 打包失败: ${zipErr.message}`, 'warn');
+                    zipPath = '';
+                }
+            }
+            const finalStatus = aborted || failedCount > 0 ? 'failed' : 'success';
+            // 🆕 池子耗尽时显示更友好的消息（已成功 X/Y 个）
+            const isPoolExhausted = String(lastError || '').includes('邮箱池已无可用邮箱')
+                || String(lastError || '').includes('池子里没有可用的已注册邮箱');
+            const failMsg = isPoolExhausted
+                ? `邮箱池已耗尽，已成功提取 ${successCount}/${targetCount} 个，请导入新邮箱后再试`
+                : `提取中止，成功 ${successCount}${lastError ? `，原因：${lastError}` : ''}`;
+            await store.updateTaskLog(task.jobKey, { status: finalStatus, message: finalStatus === 'success' ? `成功提取 ${successCount} 个普号(${modeLabel})` : failMsg, progress: 100, cdkCode: `${cdkPrefix}:${targetCount}`, rawOutput: buildSummary(zipPath) });
+            broadcastToTask(task.jobKey, { type: 'progress', jobKey: task.jobKey, progress: 100, status: finalStatus, message: finalStatus === 'success' ? `普号(${modeLabel})提取完成` : failMsg, zipPath });
+        } catch (outerErr) {
+            logTask(task.jobKey, `❌ 后台任务收尾异常: ${outerErr.message || outerErr}`, 'error');
+            try {
+                await store.updateTaskLog(task.jobKey, {
+                    status: 'failed',
+                    message: `任务收尾异常，已成功 ${successCount} 个${lastError ? `，最后错误：${lastError}` : ''}`,
+                    progress: 100,
+                    cdkCode: `${cdkPrefix}:${targetCount}`,
+                    rawOutput: buildSummary('')
+                });
+            } catch (_) {}
+        }
+        unregisterAdminGenerationStop(task.jobKey);
+    })();
+
+    return { task, workerCount, targetCount, mode: safeMode };
+}
+
+app.get('/api/admin/products/supply-download/:jobKey', authenticateAdmin, async (req, res) => {
+    try {
+        const jobKey = String(req.params?.jobKey || '').trim();
+        if (!jobKey) {
+            return res.status(400).json({ success: false, message: '缺少 jobKey' });
+        }
+        const zipPath = path.join(__dirname, 'product_files', 'zip', `free_${jobKey}.zip`);
+        if (!fs.existsSync(zipPath)) {
+            return res.status(404).json({ success: false, message: '打包文件不存在，可能尚未完成或已被清理' });
+        }
+        const stat = fs.statSync(zipPath);
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', `attachment; filename=free_${jobKey}.zip`);
+        res.setHeader('Content-Length', stat.size);
+        fs.createReadStream(zipPath).pipe(res);
+    } catch (error) {
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.get('/api/admin/products/supply-sub2api-download/:jobKey', authenticateAdmin, async (req, res) => {
+    try {
+        const jobKey = String(req.params?.jobKey || '').trim();
+        if (!jobKey) {
+            return res.status(400).json({ success: false, message: '缺少 jobKey' });
+        }
+        const subPath = path.join(__dirname, 'product_files', `sub2api_${jobKey}.json`);
+        if (!fs.existsSync(subPath)) {
+            return res.status(404).json({ success: false, message: 'sub2api JSON 不存在，仅模式 B (RC) 会生成此文件' });
+        }
+        const stat = fs.statSync(subPath);
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename=sub2api_${jobKey}.json`);
+        res.setHeader('Content-Length', stat.size);
+        fs.createReadStream(subPath).pipe(res);
+    } catch (error) {
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.get('/api/admin/supply-products', async (req, res) => {
+    try {
+        await ensureStoreReady();
+        // supply tab 独立运转，不走 imap.chiyiyi.cloud 失效同步
+        res.json(await store.listSupplyProducts());
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.delete('/api/admin/supply-products/:id', async (req, res) => {
+    try {
+        await ensureStoreReady();
+        await store.deleteSupplyProduct(req.params.id);
+        res.json({ success: true, message: '成品号已删除' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.put('/api/admin/supply-products/:id/status', async (req, res) => {
+    try {
+        await ensureStoreReady();
+        const { status } = req.body;
+        if (!['正常', '封禁'].includes(status)) {
+            return res.status(400).json({ success: false, message: '无效的状态' });
+        }
+        await store.updateSupplyProductStatus(req.params.id, status);
+        res.json({ success: true, message: '状态已更新', status });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.post('/api/admin/supply-products/export', async (req, res) => {
+    try {
+        await ensureStoreReady();
+        const { ids } = req.body || {};
+        if (!Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ success: false, message: '请先选择要出库的成品号' });
+        }
+
+        const products = await store.listSupplyProducts();
+        const selectedProducts = ids
+            .map((id) => products.find((item) => String(item.id) === String(id)))
+            .filter(Boolean);
+
+        if (selectedProducts.length !== ids.length) {
+            return res.status(404).json({ success: false, message: '部分成品号不存在或已被删除' });
+        }
+
+        const { fileName, fileBuffer } = await buildProductExportFile(selectedProducts, '成品号批量出库');
+
+        for (const product of selectedProducts) {
+            await store.markSupplyProductShipped(product.id);
+        }
+
+        res.setHeader('Content-Disposition', `attachment; filename=${encodeURIComponent(fileName)}`);
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.send(fileBuffer);
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.get('/api/admin/supply-products/:id/export', async (req, res) => {
+    try {
+        await ensureStoreReady();
+        const targetId = String(req.params.id || '').trim();
+        if (!targetId) {
+            return res.status(400).send('Missing product id');
+        }
+
+        const products = await store.listSupplyProducts();
+        const product = products.find((item) => String(item.id) === targetId);
+        if (!product) {
+            return res.status(404).send('Product not found');
+        }
+
+        const { fileName, fileBuffer } = await buildProductExportFile(
+            [product],
+            `成品号出库_${product.email}`,
+            { fileName: `${product.email}.json` }
+        );
+        await store.markSupplyProductShipped(product.id);
+
+        res.setHeader('Content-Disposition', `attachment; filename=${encodeURIComponent(fileName)}`);
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.send(fileBuffer);
+    } catch (error) {
+        res.status(500).send(error.message);
+    }
+});
+
+app.post('/api/admin/products/generate-supply', async (req, res) => {
+    const count = Math.max(1, Number(req.body?.count) || 1);
+    const maxConcurrentActivations = await store.getMaxBackgroundConcurrent();
+    const workers = Math.min(count, Math.max(1, maxConcurrentActivations));
+
+    try {
+        await ensureStoreReady();
+        const maintenanceModeState = await store.getMaintenanceModeState();
+        if (maintenanceModeState.enabled) {
+            return res.status(503).json({ success: false, message: '系统维护中，请稍后再试' });
+        }
+        const launched = await startAdminSupplyTokenGeneration(count, workers, 'rt');
+
+        return res.json({
+            success: true,
+            jobKey: launched.task.jobKey,
+            workerCount: launched.workerCount,
+            message: `普号提取任务已启动，并发上限 ${launched.workerCount}`
+        });
+    } catch (error) {
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+function makeSupplyTokenHandler(mode, modeLabel) {
+    return async (req, res) => {
+        const count = Math.max(1, Number(req.body?.count) || 1);
+        const maxConcurrentActivations = await store.getMaxBackgroundConcurrent();
+        const workers = Math.min(count, Math.max(1, maxConcurrentActivations));
+
+        try {
+            await ensureStoreReady();
+            const maintenanceModeState = await store.getMaintenanceModeState();
+            if (maintenanceModeState.enabled) {
+                return res.status(503).json({ success: false, message: '系统维护中，请稍后再试' });
+            }
+
+            // 模式 C 预检：池子里要有可用的已注册邮箱
+            if (mode === 'existing_rt') {
+                try {
+                    const available = await store.countRegisteredAvailablePoolEmails();
+                    if (available <= 0) {
+                        return res.status(400).json({
+                            success: false,
+                            message: '池子里没有可用的已注册邮箱（pool_emails WHERE registered=1 AND is_active=1 AND in_use=0）'
+                        });
+                    }
+                    if (available < count) {
+                        return res.status(400).json({
+                            success: false,
+                            message: `池子里可用的已注册邮箱只有 ${available} 个，少于请求的 ${count} 个`,
+                            availableCount: available
+                        });
+                    }
+                } catch (countErr) {
+                    return res.status(500).json({ success: false, message: `检查池子失败: ${countErr.message}` });
+                }
+            }
+
+            const launched = await startAdminSupplyTokenGeneration(count, workers, mode);
+
+            return res.json({
+                success: true,
+                jobKey: launched.task.jobKey,
+                workerCount: launched.workerCount,
+                mode: launched.mode,
+                message: `${modeLabel}任务已启动，并发上限 ${launched.workerCount}`
+            });
+        } catch (error) {
+            return res.status(500).json({ success: false, message: error.message });
+        }
+    };
+}
+
+app.post('/api/admin/products/generate-supply-rt', authenticateAdmin, makeSupplyTokenHandler('rt', '普号提取-注册→RT'));
+
+app.post('/api/admin/products/generate-supply-rc', authenticateAdmin, makeSupplyTokenHandler('rc', '普号提取-注册→RC'));
+
+app.post('/api/admin/products/generate-supply-existing-rt', authenticateAdmin, makeSupplyTokenHandler('existing_rt', '普号提取-老号→RT'));
+
 app.post('/api/admin/products/resume', async (req, res) => {
     try {
         await ensureStoreReady();
@@ -2811,7 +3256,7 @@ app.post('/api/redeem-product', async (req, res) => {
                 if (result.success) {
                     shouldRollbackCdk = false;
                     await store.resetCdkFailure(cdk); // 成功则重置失败计数和冷却
-                    await store.updateProductClaimedCdkByEmail(result.email, cdk);
+                    await (process.env.SUPPLY_MODE === '1' ? store.updateSupplyProductClaimedCdkByEmail : store.updateProductClaimedCdkByEmail)(result.email, cdk);
                     await store.markProductShippedByEmail(result.email, 1);
                     await store.updateTaskLog(task.jobKey, {
                         status: 'success',

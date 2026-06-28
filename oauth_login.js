@@ -377,7 +377,7 @@ function formatUtc8Timestamp(timestampMs) {
  * 2. 额外生成一份 CPA 兼容文件
  */
 function saveIndividualAccountJson(entry, tokenBundle = {}) {
-    const rootDir = path.join(__dirname, 'product_files');
+    const rootDir = path.join(__dirname, process.env.SUPPLY_MODE === '1' ? 'supply_files' : 'product_files');
     const sub2apiDir = path.join(rootDir, 'sub2api');
     const cpaDir = path.join(rootDir, 'cpa');
     fs.mkdirSync(sub2apiDir, { recursive: true });
@@ -424,7 +424,7 @@ function saveIndividualAccountJson(entry, tokenBundle = {}) {
 async function persistProductAsset(entry, exportInfo) {
     try {
         await store.ensureReady();
-        await store.addProduct(
+        await (process.env.SUPPLY_MODE === '1' ? store.addSupplyProduct : store.addProduct)(
             entry.name,
             exportInfo.sub2apiPath || exportInfo.filePath,
             null,

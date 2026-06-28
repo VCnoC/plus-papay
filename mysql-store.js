@@ -1764,6 +1764,264 @@ async function getClaimedProductDownloadInfo(cdk) {
     };
 }
 
+
+// ─── supply tab 完整独立产物存储（克隆自 product_assets）───
+
+async function listSupplyProducts() {
+    const rows = await runQuery(
+        `SELECT p.id,
+                p.email,
+                p.imap_key,
+                COALESCE(
+                    p.claimed_cdk,
+                    (
+                        SELECT l.cdk_code
+                        FROM task_logs l
+                        WHERE l.status = 'success'
+                          AND l.cdk_code IS NOT NULL
+                          AND l.cdk_code <> ''
+                          AND l.message LIKE CONCAT('%', p.email, '%')
+                        ORDER BY l.created_at DESC, l.id DESC
+                        LIMIT 1
+                    )
+                ) AS claimed_cdk,
+                p.file_path,
+                p.status,
+                p.shipped,
+                p.created_at
+         FROM supply_assets p
+         ORDER BY p.id DESC`
+    );
+    return rows.map(row => ({
+        ...row,
+        time: new Date(row.created_at).toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-')
+    }));
+}
+
+async function addSupplyProduct(email, filePath, password = null, token = null, imapKey = null) {
+    await runExecute(
+        `INSERT INTO supply_assets (email, file_path, password, token, imap_key) 
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE file_path = VALUES(file_path), password = VALUES(password), token = VALUES(token), imap_key = COALESCE(VALUES(imap_key), imap_key)`,
+        [email, filePath, password, token, imapKey]
+    );
+}
+
+async function upsertPendingSupplyProduct(email, accessToken = null) {
+    if (!email) return;
+    await runExecute(
+        `INSERT INTO supply_assets (email, token, status)
+         VALUES (?, ?, '待协议')
+         ON DUPLICATE KEY UPDATE token = COALESCE(VALUES(token), token)`,
+        [String(email), accessToken ? String(accessToken) : null]
+    );
+}
+
+async function markSupplyProductReadyByEmail(email, filePath = '', imapKey = null) {
+    if (!email) return;
+    await runExecute(
+        `UPDATE supply_assets
+         SET file_path = CASE WHEN ? <> '' THEN ? ELSE file_path END,
+             imap_key = COALESCE(?, imap_key),
+             status = '正常'
+         WHERE email = ?`,
+        [String(filePath || ''), String(filePath || ''), imapKey ? String(imapKey) : null, String(email)]
+    );
+}
+
+async function updateSupplyProductImapKeyByEmail(email, imapKey) {
+    await runExecute(
+        `UPDATE supply_assets SET imap_key = ? WHERE email = ?`,
+        [imapKey ? String(imapKey) : null, String(email)]
+    );
+}
+
+async function updateSupplyProductClaimedCdkByEmail(email, claimedCdk) {
+    await runExecute(
+        `UPDATE supply_assets SET claimed_cdk = ? WHERE email = ?`,
+        [claimedCdk ? String(claimedCdk) : null, String(email)]
+    );
+}
+
+async function deleteSupplyProduct(id) {
+    await runExecute(`DELETE FROM supply_assets WHERE id = ?`, [id]);
+}
+
+async function updateSupplyProductStatus(id, status) {
+    await runExecute(`UPDATE supply_assets SET status = ? WHERE id = ?`, [status, id]);
+}
+
+async function claimSupplyProductAccount(cdk) {
+    return withTransaction(async (connection) => {
+        // 1. 验证 CDK
+        const [cdkRows] = await connection.query(
+            `SELECT * FROM cdk_codes WHERE cdk_code = ? AND is_active = 1 AND used_at IS NULL AND type = '成品' FOR UPDATE`,
+            [cdk]
+        );
+        const cdkData = cdkRows[0];
+        if (!cdkData) {
+            throw new Error('CDK 无效、已使用或非成品激活码');
+        }
+
+        // 2. 查找可用成品账号
+        const [productRows] = await connection.query(
+            `SELECT * FROM supply_assets WHERE shipped = 0 AND status = '正常' ORDER BY id ASC LIMIT 1 FOR UPDATE`
+        );
+        const product = productRows[0];
+        if (!product) {
+            throw new Error('当前成品号库暂时缺货，请联系客服补充');
+        }
+
+        // 3. 标记 CDK 已使用
+        await connection.query(
+            `UPDATE cdk_codes SET used_at = CURRENT_TIMESTAMP WHERE id = ?`,
+            [cdkData.id]
+        );
+
+        // 4. 标记成品号已出库
+        await connection.query(
+            `UPDATE supply_assets SET shipped = 1, claimed_cdk = ? WHERE id = ?`,
+            [String(cdk), product.id]
+        );
+
+        // 5. 创建成功日志
+        const jobKey = `PROD-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        await connection.query(
+            `INSERT INTO task_logs (job_key, token_preview, cdk_code, status, message, progress, display_time)
+             VALUES (?, ?, ?, 'success', ?, 100, ?)`,
+            [
+                jobKey,
+                'PRODUCT_CLAIM',
+                cdk,
+                `成品号兑换成功: ${product.email}`,
+                new Date().toLocaleString('zh-CN', { hour12: false }).replace(/\//g, '-')
+            ]
+        );
+
+        return {
+            email: product.email,
+            password: product.password,
+            token: product.token,
+            imapKey: product.imap_key || '',
+            jobKey
+        };
+    });
+}
+
+async function updateSupplyProductStatusByEmail(email, status) {
+    await runExecute(`UPDATE supply_assets SET status = ? WHERE email = ?`, [status, email]);
+}
+
+async function updateSupplyProductStatusByEmails(emails, status) {
+    const normalizedEmails = [...new Set(
+        (Array.isArray(emails) ? emails : [])
+            .map((item) => String(item || '').trim().toLowerCase())
+            .filter(Boolean)
+    )];
+
+    if (normalizedEmails.length === 0) {
+        return 0;
+    }
+
+    const placeholders = normalizedEmails.map(() => '?').join(', ');
+    const result = await runExecute(
+        `UPDATE supply_assets SET status = ? WHERE LOWER(email) IN (${placeholders})`,
+        [status, ...normalizedEmails]
+    );
+    return Number(result?.affectedRows || 0);
+}
+
+async function markSupplyProductShipped(id, shipped = 1) {
+    await runExecute(`UPDATE supply_assets SET shipped = ? WHERE id = ?`, [shipped, id]);
+}
+
+async function markSupplyProductShippedByEmail(email, shipped = 1) {
+    await runExecute(`UPDATE supply_assets SET shipped = ? WHERE email = ?`, [shipped, email]);
+}
+
+async function getClaimedSupplyProductDownloadInfo(cdk) {
+    const logRows = await runQuery(
+        `SELECT message, raw_output
+         FROM task_logs
+         WHERE cdk_code = ?
+           AND status = 'success'
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+        [String(cdk)]
+    );
+
+    const logRow = logRows[0] || null;
+    if (!logRow) {
+        return null;
+    }
+
+    const message = String(logRow.message || '');
+    let email = '';
+    let filePath = '';
+    let imapKey = '';
+
+    const messageMatch = message.match(/成品号(?:兑换|创建)成功:\s*(.+)$/);
+    if (messageMatch) {
+        email = String(messageMatch[1] || '').trim();
+    }
+
+    try {
+        const parsed = logRow.raw_output ? JSON.parse(logRow.raw_output) : null;
+        if (!email) {
+            email = String(parsed?.email || '').trim();
+        }
+        filePath = String(parsed?.sub2apiPath || parsed?.filePath || '').trim();
+        imapKey = String(parsed?.imapKey || '').trim();
+    } catch (_) { }
+
+    if (filePath && imapKey) {
+        return {
+            email,
+            filePath,
+            imapKey
+        };
+    }
+
+    if (!email) {
+        const claimedRows = await runQuery(
+            `SELECT email, imap_key, file_path
+             FROM supply_assets
+             WHERE claimed_cdk = ?
+             ORDER BY id DESC
+             LIMIT 1`,
+            [String(cdk)]
+        );
+        const claimedProduct = claimedRows[0];
+        if (!claimedProduct || !claimedProduct.file_path) {
+            return null;
+        }
+        return {
+            email: claimedProduct.email,
+            filePath: filePath || claimedProduct.file_path,
+            imapKey: imapKey || claimedProduct.imap_key || ''
+        };
+    }
+
+    const productRows = await runQuery(
+        `SELECT email, imap_key, file_path, status, shipped
+         FROM supply_assets
+         WHERE email = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        [email]
+    );
+    const product = productRows[0];
+    if (!product || !product.file_path) {
+        return null;
+    }
+
+    return {
+        email: product.email,
+        filePath: filePath || product.file_path,
+        imapKey: imapKey || product.imap_key || ''
+    };
+}
+
 module.exports = {
     ensureReady,
     getAdminData,
@@ -1834,5 +2092,19 @@ module.exports = {
         port: DB_PORT,
         database: DB_NAME,
         user: DB_USER
-    }
+    },
+    listSupplyProducts,
+    addSupplyProduct,
+    upsertPendingSupplyProduct,
+    markSupplyProductReadyByEmail,
+    updateSupplyProductImapKeyByEmail,
+    updateSupplyProductClaimedCdkByEmail,
+    deleteSupplyProduct,
+    updateSupplyProductStatus,
+    claimSupplyProductAccount,
+    updateSupplyProductStatusByEmail,
+    updateSupplyProductStatusByEmails,
+    markSupplyProductShipped,
+    markSupplyProductShippedByEmail,
+    getClaimedSupplyProductDownloadInfo
 };

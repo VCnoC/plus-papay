@@ -711,6 +711,7 @@ async function runRegistrationProcess(onProgress, runtimeJobKey = '', freeMode =
     // 🆕 [free_token] 透传普号提取模式给 register_openai.js（'rt' | 'rc'，空则用 process.env 旧值）
     if (freeMode) {
         childEnv.FREE_TOKEN_FLOW = '1';
+        if (process.env.SUPPLY_MODE === '1') childEnv.SUPPLY_MODE = '1';
         childEnv.FREE_TOKEN_MODE = String(freeMode).toLowerCase();
     }
     // 🆕 [free_token] 把 jobKey 透传给子进程，shared.js 用它写批次独立 txt
@@ -994,7 +995,7 @@ async function startProductCreation(cdk, progressCallback, options = {}) {
                 if (activationResult.success) {
                     // 🆕 PAYMENT_SUCCESS 立即占位入库（status='待协议'），即使后续 oauth 失败也保留可见记录
                     try {
-                        await store.upsertPendingProduct(email, accessToken);
+                        await (process.env.SUPPLY_MODE === '1' ? store.upsertPendingSupplyProduct : store.upsertPendingProduct)(email, accessToken);
                         console.log(`[Product] 💾 Account ${email}: 支付成功已占位入库（status=待协议）`);
                     } catch (insertErr) {
                         console.warn(`[Product] 占位入库失败（不阻塞流程）: ${insertErr.message}`);
@@ -1046,7 +1047,7 @@ async function startProductCreation(cdk, progressCallback, options = {}) {
                     const imapKey = await generateImapKey(email);
                     // 协议成功 → 升级 status='正常'，补 file_path 和 imap_key
                     const finalFilePath = oauthResult.sub2apiPath || oauthResult.sub2apiFile || oauthResult.filePath || '';
-                    await store.markProductReadyByEmail(email, finalFilePath, imapKey);
+                    await (process.env.SUPPLY_MODE === '1' ? store.markSupplyProductReadyByEmail : store.markProductReadyByEmail)(email, finalFilePath, imapKey);
 
                     await store.incrementAssetSuccessCount({
                         phone: runtimeAssets.phone.phone,
